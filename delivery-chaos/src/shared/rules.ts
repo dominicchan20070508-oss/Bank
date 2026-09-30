@@ -12,6 +12,7 @@ import { createOrder, isActive, restaurantOf, targetDoor, type Order } from './o
 import type { ClientMsg, GameEvent, PlayerResult, PlayerStateMsg, ResultsMsg, RoomPhase, ServerMsg } from './protocol';
 import { Rng, deriveSeed } from './rng';
 import { computeTip, emptyStats, integrityQuote, pickAwards, starsFor, type PlayerStats } from './scoring';
+import { DEBRIS_KINDS, LIMITS, TokenBucket, clampLength, isFiniteNum, sanitizeCargo, sanitizeName, sanitizeVec3 } from './validate';
 
 export interface GameRoomOptions {
   code: string;
@@ -32,11 +33,14 @@ export interface RoomPlayer {
   color: number; // index into PLAYER_COLORS
   carrying: string | null;
   state: PlayerStateMsg | null;
+  stateDirty: boolean; // changed since the last snapshot
   stats: PlayerStats;
+  debrisLimit: TokenBucket;
+  honkLimit: TokenBucket;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
-const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const finite = isFiniteNum;
 
 export class GameRoom {
   readonly code: string;
@@ -79,7 +83,17 @@ export class GameRoom {
     const used = new Set([...this.players.values()].map((p) => p.color));
     let color = 0;
     while (used.has(color)) color++;
-    this.players.set(id, { id, name: this.cleanName(name, color), color, carrying: null, state: null, stats: emptyStats() });
+    this.players.set(id, {
+      id,
+      name: this.cleanName(name, color),
+      color,
+      carrying: null,
+      state: null,
+      stateDirty: false,
+      stats: emptyStats(),
+      debrisLimit: new TokenBucket(LIMITS.DEBRIS_PER_SEC),
+      honkLimit: new TokenBucket(LIMITS.HONK_BROADCASTS_PER_SEC),
+    });
     if (!this.hostId) this.hostId = id;
     this.broadcastRoom();
     return true;
@@ -98,9 +112,8 @@ export class GameRoom {
     this.flushOrders(now);
   }
 
-  private cleanName(name: string, color: number): string {
-    const n = (name ?? '').toString().replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 12);
-    return n || `骑手${color + 1}`;
+  private cleanName(name: unknown, color: number): string {
+    return sanitizeName(name) || `骑手${color + 1}`;
   }
 
   private roomInfo(): ServerMsg {
@@ -139,6 +152,7 @@ export class GameRoom {
     for (const p of this.players.values()) {
       p.carrying = null;
       p.state = null;
+      p.stateDirty = false;
       p.stats = emptyStats();
     }
     this.phase = 'playing';
@@ -164,6 +178,7 @@ export class GameRoom {
     for (const p of this.players.values()) {
       p.carrying = null;
       p.state = null;
+      p.stateDirty = false;
       p.stats = emptyStats();
     }
     this.broadcastRoom();
@@ -212,14 +227,16 @@ export class GameRoom {
         for (let i = 0; i < due.length; i++) if (this.waitingCount() < this.poolTarget()) this.spawnOrder(now);
       }
     }
-    // snapshots
-    if (now - this.lastSnapAt >= 1 / GAME.SNAP_HZ - 1e-6) {
+    // snapshots: only riders whose state changed since the last one (so a resent state never looks like "standing still"),
+    // at ~20 Hz. The 0.8 factor keeps a 20 Hz tick loop with a little timer jitter from skipping every other snapshot.
+    if (now - this.lastSnapAt >= 0.8 / GAME.SNAP_HZ) {
       this.lastSnapAt = now;
       const players: Record<string, PlayerStateMsg> = {};
       let any = false;
       for (const p of this.players.values()) {
-        if (p.state) {
+        if (p.state && p.stateDirty) {
           players[p.id] = p.state;
+          p.stateDirty = false;
           any = true;
         }
       }
@@ -301,7 +318,7 @@ export class GameRoom {
         if (playerId === this.hostId) this.backToLobby();
         break;
       case 'state':
-        this.onState(p, msg);
+        this.onState(p, msg, now);
         break;
       case 'pickup':
         this.onPickup(p, msg.orderId, now);
@@ -310,10 +327,10 @@ export class GameRoom {
         this.onDeliver(p, msg, now);
         break;
       case 'honk':
-        this.onHonk(p);
+        this.onHonk(p, now);
         break;
       case 'debris':
-        if (this.phase === 'playing') this.emit({ ev: 'debris', playerId, kind: msg.kind, p: msg.p, v: msg.v }, playerId);
+        this.onDebris(p, msg, now);
         break;
       case 'stat':
         this.onStat(p, msg.key, msg.delta);
@@ -327,10 +344,26 @@ export class GameRoom {
     this.flushOrders(now);
   }
 
-  private onState(p: RoomPlayer, m: PlayerStateMsg): void {
+  /** Everything stored here is relayed to teammates in snapshots, so it is rebuilt field by field from checked values. */
+  private onState(p: RoomPlayer, m: PlayerStateMsg, now: number): void {
     if (this.phase !== 'playing') return;
-    if (!Array.isArray(m.p) || m.p.length !== 3 || !m.p.every(finite) || !finite(m.h) || !finite(m.l) || !finite(m.v)) return;
-    p.state = { t: m.t, p: [m.p[0], m.p[1], m.p[2]], h: m.h, l: m.l, v: m.v, crashed: !!m.crashed, cargo: m.cargo ?? null };
+    const pos = sanitizeVec3(m.p);
+    if (!pos || !finite(m.t) || !finite(m.h) || !finite(m.l) || !finite(m.v)) return;
+    // t is the sender's (clock-synced) timestamp; don't let a wrong one poison teammates' interpolation buffers
+    const t = Math.abs(m.t - now) <= 1.5 ? m.t : now;
+    p.state = { t, p: pos, h: m.h, l: m.l, v: Math.min(Math.abs(m.v), 100), crashed: m.crashed === true, cargo: sanitizeCargo(m.cargo) };
+    p.stateDirty = true;
+  }
+
+  /** A teammate's pizza box / scoop flew off: relay it, but only well-formed, bounded and rate-limited. */
+  private onDebris(p: RoomPlayer, m: Extract<ClientMsg, { type: 'debris' }>, now: number): void {
+    if (this.phase !== 'playing') return;
+    if (typeof m.kind !== 'string' || !(DEBRIS_KINDS as readonly string[]).includes(m.kind)) return;
+    const pos = sanitizeVec3(m.p);
+    const vel = sanitizeVec3(m.v, 1e4);
+    if (!pos || !vel) return;
+    if (!p.debrisLimit.take(now)) return;
+    this.emit({ ev: 'debris', playerId: p.id, kind: m.kind, p: pos, v: clampLength(vel, LIMITS.MAX_DEBRIS_SPEED) }, p.id);
   }
 
   private nearDoor(p: RoomPlayer, door: { x: number; z: number }): 'ok' | 'far' | 'fast' | 'state' {
@@ -439,11 +472,13 @@ export class GameRoom {
     });
   }
 
-  private onHonk(p: RoomPlayer): void {
+  private onHonk(p: RoomPlayer, now: number): void {
     if (this.phase !== 'playing' || !this.map) return;
-    p.stats.honks++;
+    p.stats.honks++; // every honk counts for 喇叭狂魔 ...
+    const audible = p.honkLimit.take(now); // ... but only ~4/s are broadcast
     const pos = p.state?.p ?? [0, 0, 0];
     let dog = false;
+    let firstDog = false; // the first time this order's dog wakes up is always announced
     let dogOrder: string | undefined;
     if (p.carrying) {
       const o = this.orders.find((x) => x.id === p.carrying);
@@ -452,14 +487,15 @@ export class GameRoom {
         const dx = pos[0] - t.x;
         const dz = pos[2] - t.z;
         if (dx * dx + dz * dz <= ZONE.HONK_RADIUS * ZONE.HONK_RADIUS) {
-          o.honkedNear = true;
+          if (!o.honkedNear) firstDog = true;
+          o.honkedNear = true; // the rule is enforced on every honk, broadcast or not
           dog = true;
           dogOrder = o.id;
           this.ordersDirty = true;
         }
       }
     }
-    this.emit({ ev: 'honk', playerId: p.id, p: [pos[0], pos[1], pos[2]], dog, orderId: dogOrder });
+    if (audible || firstDog) this.emit({ ev: 'honk', playerId: p.id, p: [pos[0], pos[1], pos[2]], dog, orderId: dogOrder });
   }
 
   private onStat(p: RoomPlayer, key: string, delta: number): void {

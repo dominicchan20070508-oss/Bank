@@ -28,16 +28,26 @@ export class RemoteBike {
     scene.add(this.model.root);
   }
 
-  push(serverTime: number, s: PlayerStateMsg, cargoSize: number): void {
-    this.buffer.push(toSample(serverTime, s));
-    const kind = s.cargo?.kind ?? null;
+  /** `t` = the state's own timestamp on the room clock. cargoSize = the order's size if known (else guessed from the summary). */
+  push(s: PlayerStateMsg, cargoSize: number): void {
+    const sample = toSample(s.t, s);
+    if (!sample) return; // garbage from the network: ignore it
+    this.buffer.push(sample);
+    const kind = sample.cargo?.kind ?? null;
     if (kind !== this.cargo.currentKind) {
-      if (kind) this.cargo.setKind(kind, cargoSize);
+      if (kind) this.cargo.setKind(kind, kind === 'soup' ? 1 : Math.max(1, Math.round(cargoSize), Math.round(sample.cargo!.a)));
       else this.cargo.clear();
+      this.model.setName(this.info.name, kind); // the tag shows what they are carrying
     }
   }
 
-  update(dt: number, serverNow: number): void {
+  /** where this rider is (interpolated) at the given room time; null until the first snapshot arrives */
+  positionAt(serverNow: number): [number, number, number] | null {
+    const s = this.buffer.sample(serverNow - INTERP_DELAY);
+    return s ? [s.x, s.y, s.z] : null;
+  }
+
+  update(dt: number, serverNow: number, camera?: THREE.Vector3): void {
     const s = this.buffer.sample(serverNow - INTERP_DELAY);
     if (!s) return;
     this.model.setVisible(true);
@@ -53,6 +63,13 @@ export class RemoteBike {
       dt,
     );
     this.cargo.apply(s.cargo);
+    // keep teammates easy to spot from afar: the bike grows a little with distance (up to 1.8x) and the name tag more
+    if (camera) {
+      const d = camera.distanceTo(this.model.root.position);
+      const body = Math.min(1.8, Math.max(1, d / 22));
+      this.model.root.scale.setScalar(body);
+      this.model.setTagScale(Math.min(4.5, Math.max(1, d / 10)) / body);
+    }
   }
 
   dispose(): void {

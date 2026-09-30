@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import type { CargoSummary } from '../shared/protocol';
 import type { FoodKind } from '../shared/map';
-import { CARGO } from '../shared/constants';
+import { CARGO, CARGO_VIEW } from '../shared/constants';
 
 export const SCOOP_COLORS = [0xff8fb8, 0x8fe3c0, 0xfff1c9, 0xc9a7ff];
 export const SOUP_COLOR = 0xffa63d;
@@ -14,6 +14,11 @@ const BOX_H = 0.13;
 
 export class CargoView {
   readonly group = new THREE.Group();
+
+  constructor() {
+    this.group.scale.setScalar(CARGO_VIEW.SCALE);
+  }
+
   private kind: FoodKind | null = null;
   private size = 1;
   private readonly geos: THREE.BufferGeometry[] = [];
@@ -96,10 +101,11 @@ export class CargoView {
     liq.visible = s.a > 0.01;
     const fill = 0.07 + 0.24 * s.a;
     // heaped toward rider-right (b > 0) => surface tilts so its right side is higher
+    const g = CARGO_VIEW.WOBBLE_GAIN; // visual exaggeration only: the sim keeps its own numbers
     const k = 0.55 / CARGO.SOUP.SPILL_LIMIT;
-    liq.rotation.set(-s.c * 0.5 * (k * 0.5), 0, -s.b * 0.5 * (k * 0.5));
+    liq.rotation.set(-s.c * 0.5 * (k * 0.5) * g, 0, -s.b * 0.5 * (k * 0.5) * g);
     // the heaped side climbs up the bowl
-    liq.position.set(-s.b * 0.06, fill + Math.hypot(s.b, s.c) * 0.05, s.c * 0.06);
+    liq.position.set(-s.b * 0.06 * g, fill + Math.hypot(s.b, s.c) * 0.05 * g, s.c * 0.06 * g);
     const r = Math.min(1, 0.85 + 0.15 * (fill / 0.31));
     liq.scale.set(r, 1, r);
   }
@@ -123,13 +129,14 @@ export class CargoView {
 
   private updatePizza(s: CargoSummary): void {
     const left = Math.round(s.a);
+    const g = CARGO_VIEW.WOBBLE_GAIN;
     for (let i = 0; i < this.boxes.length; i++) {
       const m = this.boxes[i]!;
       m.visible = i < left;
       const h = BOX_H * (i + 0.5); // height of this layer above the base
-      const bend = 1.4; // how far higher layers shift per unit tilt
+      const bend = 1.4 * g; // how far higher layers shift per unit tilt
       m.position.set(-s.b * h * bend, h, s.c * h * bend);
-      m.rotation.set(s.c * 0.9, 0, s.b * 0.9);
+      m.rotation.set(s.c * 0.9 * g, 0, s.b * 0.9 * g);
     }
   }
 
@@ -154,7 +161,7 @@ export class CargoView {
   private updateIce(s: CargoSummary): void {
     const left = Math.round(s.a);
     const melt = s.b;
-    const wobble = s.c;
+    const wobble = s.c * CARGO_VIEW.WOBBLE_GAIN;
     const squash = 1 - 0.38 * melt;
     for (let i = 0; i < this.scoops.length; i++) {
       const m = this.scoops[i]!;
@@ -169,7 +176,7 @@ export class CargoView {
 
   // ---------------------------------------------------------------- shared
   apply(s: CargoSummary | null): void {
-    if (!s || s.kind !== this.kind) return;
+    if (!s || s.kind !== this.kind || !Number.isFinite(s.a) || !Number.isFinite(s.b) || !Number.isFinite(s.c)) return;
     this.lastSummary = s;
     if (s.kind === 'soup') this.updateSoup(s);
     else if (s.kind === 'pizza') this.updatePizza(s);

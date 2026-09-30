@@ -42,6 +42,10 @@ export class LocalTransport implements Transport {
     return () => this.handlers.delete(handler);
   }
 
+  onClose(): () => void {
+    return () => {}; // an in-browser room never disconnects
+  }
+
   update(): void {
     if (!this.connected) return;
     this.room.tick(this.clock());

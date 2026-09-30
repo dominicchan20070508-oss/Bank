@@ -1,5 +1,6 @@
 // Low-poly motorbike + rider built from primitives. Faces local +z. Used for the local bike and remote bikes.
 import * as THREE from 'three';
+import type { FoodKind } from '../shared/map';
 import { makeNameTag, type LabelSprite } from './sprites';
 
 export interface BikePose {
@@ -32,6 +33,7 @@ export class BikeModel {
   private readonly geos: THREE.BufferGeometry[] = [];
   private readonly mats: THREE.Material[] = [];
   private tag: LabelSprite | null = null;
+  private readonly tagBase = new THREE.Vector2(1, 1);
 
   constructor(readonly color: number, name?: string) {
     this.root.rotation.order = 'YXZ';
@@ -135,12 +137,18 @@ export class BikeModel {
     return m;
   }
 
-  setName(name: string): void {
+  setName(name: string, carrying: FoodKind | null = null): void {
     this.tag?.dispose();
     if (this.tag) this.root.remove(this.tag.sprite);
-    this.tag = makeNameTag(name, this.color);
-    this.tag.sprite.position.set(0, 3.3, 0);
+    this.tag = makeNameTag(name, this.color, carrying);
+    this.tag.sprite.center.set(0.5, 0); // anchored at the pointer tip, so the tag grows upward when scaled
+    this.tag.sprite.position.set(0, 2.85, 0);
+    this.tagBase.set(this.tag.sprite.scale.x, this.tag.sprite.scale.y);
     this.root.add(this.tag.sprite);
+  }
+
+  setTagScale(k: number): void {
+    if (this.tag) this.tag.sprite.scale.set(this.tagBase.x * k, this.tagBase.y * k, 1);
   }
 
   update(p: BikePose, dt: number): void {

@@ -44,6 +44,8 @@ export class Hud {
   private readonly mmEl: HTMLElement;
   private readonly dbgEl: HTMLElement | null;
   private cards = new Map<string, Card>();
+  private lastOrder: string[] = [];
+  private readonly moreEl: HTMLElement;
   private ctx: OrdersContext | null = null;
   private last = new Map<string, string>();
 
@@ -81,6 +83,10 @@ export class Hud {
     this.tipsEl = q('tips');
     this.starFill = q('starfill');
     this.ordersEl = q('orders');
+    this.moreEl = document.createElement('div');
+    this.moreEl.className = 'orders-more';
+    this.moreEl.hidden = true;
+    window.addEventListener('resize', () => this.fitCards(this.lastOrder));
     this.cargoLabel = q('clabel');
     this.cargoIcon = q<HTMLImageElement>('cicon');
     this.cargoFill = q('cfill');
@@ -154,10 +160,11 @@ export class Hud {
   // ---------------------------------------------------------------- orders
   setOrders(list: readonly Order[], ctx: OrdersContext): void {
     this.ctx = ctx;
+    // what you need to see first: your own order, then who is carrying what, then what is still up for grabs
     const rank = (o: Order) => {
       if (o.status === 'carrying' && o.carrierId === ctx.myId) return 0;
-      if (o.status === 'waiting') return 1;
-      if (o.status === 'carrying') return 2;
+      if (o.status === 'carrying') return 1;
+      if (o.status === 'waiting') return 2;
       return 3;
     };
     const sorted = [...list].sort((a, b) => rank(a) - rank(b) || a.createdAt - b.createdAt);
@@ -179,6 +186,22 @@ export class Hud {
         this.cards.delete(id);
       }
     }
+    this.fitCards(sorted.map((o) => o.id));
+  }
+
+  /** Show as many cards as fit under the top-right corner (most important first) and say how many are hidden. */
+  private fitCards(orderedIds: string[]): void {
+    this.lastOrder = orderedIds;
+    const room = Math.max(1, Math.floor((window.innerHeight - 250) / 78));
+    const visible = orderedIds.length <= room ? orderedIds.length : room - 1;
+    orderedIds.forEach((id, i) => {
+      const c = this.cards.get(id);
+      if (c) c.el.hidden = i >= visible;
+    });
+    const hidden = orderedIds.length - visible;
+    this.moreEl.hidden = hidden <= 0;
+    this.moreEl.textContent = `还有 ${hidden} 单…`;
+    this.ordersEl.append(this.moreEl);
   }
 
   private makeCard(o: Order, ctx: OrdersContext): Card {

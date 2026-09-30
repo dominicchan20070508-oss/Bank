@@ -11,7 +11,7 @@
 export const GAME = {
   DURATION: 240, // seconds per round
   MAX_PLAYERS: 4,
-  STAR_PER_PLAYER: [60, 110, 160] as const, // team tips needed for 1/2/3 stars, multiplied by player count
+  STAR_PER_PLAYER: [110, 200, 290] as const, // team tips needed for 1/2/3 stars, multiplied by player count
   SNAP_HZ: 20, // server -> client snapshot rate
   STATE_HZ: 20, // client -> server state rate
 } as const;
@@ -189,9 +189,10 @@ export const CARGO = {
 
 // ---------- Client-only feel / visuals (still tunable, but never used by shared rules) ----------
 export const VIEW = {
-  CAM_BACK: 6,
-  CAM_HEIGHT: 3,
-  CAM_LOOK_AHEAD: 4,
+  CAM_BACK: 5.2,
+  CAM_HEIGHT: 2.8,
+  CAM_LOOK_AHEAD: 2.6,
+  CAM_LOOK_HEIGHT: 1.75, // look target height above the road: just above the cargo rack
   FOV_MIN: 60,
   FOV_MAX: 72,
   CAM_YAW_RATE: 4.5,
@@ -206,4 +207,10 @@ export const VIEW = {
   MAX_SUBSTEPS: 30, // physics catch-up per frame (0.5 s); a step costs ~0.1 ms, so the sim stays in real time down to ~2 fps
   MAX_FRAME_DT: 0.5,
   SHADOW_RANGE: 48,
+} as const;
+
+/** Visual-only cargo presentation. Never read by the sim or the rules. */
+export const CARGO_VIEW = {
+  SCALE: 1.4, // size of the cargo on the rack
+  WOBBLE_GAIN: 1.6, // exaggeration of the tower offset / tilt, soup surface tilt and scoop sway
 } as const;

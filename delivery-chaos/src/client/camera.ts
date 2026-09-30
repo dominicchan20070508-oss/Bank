@@ -68,7 +68,7 @@ export class ChaseCamera {
     this.pos.y += (ty - this.pos.y) * k;
     this.pos.z += (tz - this.pos.z) * k;
 
-    this.look.set(x + Math.sin(this.yaw) * VIEW.CAM_LOOK_AHEAD, y + 1.3, z + Math.cos(this.yaw) * VIEW.CAM_LOOK_AHEAD);
+    this.look.set(x + Math.sin(this.yaw) * VIEW.CAM_LOOK_AHEAD, y + VIEW.CAM_LOOK_HEIGHT, z + Math.cos(this.yaw) * VIEW.CAM_LOOK_AHEAD);
 
     // shake
     this.shakeT += dt * 55;

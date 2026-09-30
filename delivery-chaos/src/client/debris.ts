@@ -2,7 +2,7 @@
 // They live 8 s, collide with the world (not with bikes), and the total count is capped.
 import * as CANNON from 'cannon-es';
 import * as THREE from 'three';
-import { VIEW } from '../shared/constants';
+import { CARGO_VIEW, VIEW } from '../shared/constants';
 import type { DebrisKind } from '../shared/protocol';
 import { PIZZA_BOX_COLORS, SCOOP_COLORS, SOUP_COLOR } from './cargoView';
 import { GROUP, type PhysicsWorld } from './physics';
@@ -16,8 +16,8 @@ interface Piece {
 export class DebrisManager {
   private readonly pieces: Piece[] = [];
   private readonly geos = {
-    pizza: new THREE.BoxGeometry(0.66, 0.13, 0.66),
-    scoop: new THREE.SphereGeometry(0.23, 12, 9),
+    pizza: new THREE.BoxGeometry(0.66 * CARGO_VIEW.SCALE, 0.13 * CARGO_VIEW.SCALE, 0.66 * CARGO_VIEW.SCALE),
+    scoop: new THREE.SphereGeometry(0.23 * CARGO_VIEW.SCALE, 12, 9),
     drop: new THREE.SphereGeometry(0.1, 8, 6),
   };
   private readonly mats = {
@@ -37,16 +37,22 @@ export class DebrisManager {
   }
 
   spawn(kind: DebrisKind, p: [number, number, number], v: [number, number, number], spin = 6): void {
+    // (remote debris comes off the network: ignore anything that isn't a plain, finite, bounded number)
+    if (!p || !v || p.length !== 3 || v.length !== 3 || !p.every(Number.isFinite) || !v.every(Number.isFinite)) return;
+    if (Math.hypot(p[0], p[1], p[2]) > 5000) return;
+    if (kind !== 'pizza' && kind !== 'scoop' && kind !== 'drop') return;
+    const speed = Math.hypot(v[0], v[1], v[2]);
+    if (speed > 60) v = [(v[0] * 60) / speed, (v[1] * 60) / speed, (v[2] * 60) / speed];
     if (this.pieces.length >= VIEW.DEBRIS_MAX) this.remove(0); // drop the oldest
     let shape: CANNON.Shape;
     let mass: number;
     let mat: THREE.Material;
     if (kind === 'pizza') {
-      shape = new CANNON.Box(new CANNON.Vec3(0.33, 0.065, 0.33));
+      shape = new CANNON.Box(new CANNON.Vec3(0.33 * CARGO_VIEW.SCALE, 0.065 * CARGO_VIEW.SCALE, 0.33 * CARGO_VIEW.SCALE));
       mass = 0.5;
       mat = this.mats.pizza[this.colorCursor++ % 2]!;
     } else if (kind === 'scoop') {
-      shape = new CANNON.Sphere(0.23);
+      shape = new CANNON.Sphere(0.23 * CARGO_VIEW.SCALE);
       mass = 0.35;
       mat = this.mats.scoop[this.colorCursor++ % this.mats.scoop.length]!;
     } else {

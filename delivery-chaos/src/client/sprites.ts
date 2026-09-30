@@ -1,6 +1,6 @@
 // Canvas-textured billboards: player name tags, restaurant signs, customer door labels.
 import * as THREE from 'three';
-import type { Customer, Restaurant } from '../shared/map';
+import type { Customer, FoodKind, Restaurant } from '../shared/map';
 import { UI_FONT, drawFoodIcon, roundRect } from './icons';
 
 export interface LabelSprite {
@@ -24,25 +24,44 @@ function toSprite(canvas: HTMLCanvasElement, worldHeight: number): LabelSprite {
   };
 }
 
-/** Player name above the bike. */
-export function makeNameTag(name: string, color: number): LabelSprite {
+/** Player name above the bike, with a little pointer in the player's colour so teammates can be spotted from afar. */
+export function makeNameTag(name: string, color: number, food: FoodKind | null = null): LabelSprite {
   const c = document.createElement('canvas');
   c.width = 256;
-  c.height = 64;
+  c.height = 96;
   const ctx = c.getContext('2d')!;
+  const hex = '#' + color.toString(16).padStart(6, '0');
   ctx.font = `bold 34px ${UI_FONT}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  const w = Math.min(244, ctx.measureText(name).width + 34);
-  ctx.fillStyle = 'rgba(30,28,40,0.72)';
+  const iconW = food ? 44 : 0; // carrying something? show what, so teammates' cargo is readable from afar
+  const w = Math.min(244, ctx.measureText(name).width + 34 + iconW);
+  ctx.fillStyle = 'rgba(30,28,40,0.78)';
   roundRect(ctx, 128 - w / 2, 8, w, 48, 20);
   ctx.fill();
-  ctx.strokeStyle = '#' + color.toString(16).padStart(6, '0');
-  ctx.lineWidth = 4;
+  ctx.strokeStyle = hex;
+  ctx.lineWidth = 5;
   ctx.stroke();
   ctx.fillStyle = '#fff';
-  ctx.fillText(name, 128, 33, 230);
-  return toSprite(c, 0.55);
+  ctx.fillText(name, 128 + iconW / 2, 33, 230 - iconW);
+  if (food) {
+    ctx.save();
+    ctx.translate(128 - w / 2 + 8, 12);
+    drawFoodIcon(ctx, food, 40);
+    ctx.restore();
+  }
+  // pointer
+  ctx.beginPath();
+  ctx.moveTo(108, 62);
+  ctx.lineTo(148, 62);
+  ctx.lineTo(128, 90);
+  ctx.closePath();
+  ctx.fillStyle = hex;
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#2b2a33';
+  ctx.stroke();
+  return toSprite(c, 0.8);
 }
 
 export function makeRestaurantSign(r: Restaurant): LabelSprite {

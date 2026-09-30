@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { InterpBuffer, type Sample } from '../src/client/interp';
+import { InterpBuffer, toSample, type Sample } from '../src/client/interp';
+import type { PlayerStateMsg } from '../src/shared/protocol';
 
 const S = (t: number, x: number, extra: Partial<Sample> = {}): Sample => ({ t, x, y: 0.5, z: 0, h: 0, l: 0, v: 10, crashed: false, cargo: null, ...extra });
 
@@ -56,5 +57,35 @@ describe('InterpBuffer', () => {
     const b = new InterpBuffer();
     for (let i = 0; i < 400; i++) b.push(S(i * 0.05, i));
     expect(b.length).toBeLessThan(40);
+  });
+});
+
+describe('toSample (never trust the network)', () => {
+  const good: PlayerStateMsg = { t: 5, p: [1, 2, 3], h: 0.5, l: 0.1, v: 4, crashed: false, cargo: { kind: 'pizza', a: 3, b: 0.1, c: -0.1 } };
+
+  it('accepts a well-formed state', () => {
+    expect(toSample(5, good)).toEqual({ t: 5, x: 1, y: 2, z: 3, h: 0.5, l: 0.1, v: 4, crashed: false, cargo: { kind: 'pizza', a: 3, b: 0.1, c: -0.1 } });
+  });
+
+  it('rejects non-finite or malformed values instead of feeding them to the renderer', () => {
+    const bad = (patch: Record<string, unknown>) => toSample(5, { ...good, ...patch } as unknown as PlayerStateMsg);
+    expect(bad({ p: [1, NaN, 3] })).toBeNull();
+    expect(bad({ p: [1, 2] })).toBeNull();
+    expect(bad({ p: 'x' })).toBeNull();
+    expect(bad({ h: Infinity })).toBeNull();
+    expect(bad({ l: undefined })).toBeNull();
+    expect(bad({ v: null })).toBeNull();
+    expect(toSample(NaN, good)).toBeNull();
+    expect(toSample(5, null as unknown as PlayerStateMsg)).toBeNull();
+  });
+
+  it('drops a broken cargo summary but keeps the rider', () => {
+    expect(bad2({ kind: 'bomb', a: 1, b: 0, c: 0 })?.cargo).toBeNull();
+    expect(bad2({ kind: 'soup', a: NaN, b: 0, c: 0 })?.cargo).toBeNull();
+    expect(bad2('soup')?.cargo).toBeNull();
+    expect(bad2({ kind: 'soup', a: 1, b: 0, c: 0 })?.cargo).toEqual({ kind: 'soup', a: 1, b: 0, c: 0 });
+    function bad2(cargo: unknown) {
+      return toSample(5, { ...good, cargo } as unknown as PlayerStateMsg);
+    }
   });
 });

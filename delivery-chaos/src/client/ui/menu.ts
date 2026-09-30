@@ -77,6 +77,9 @@ export class Menu {
       this.joinRow.hidden = false;
       this.codeInput.focus();
     });
+    this.codeInput.addEventListener('input', () => {
+      this.codeInput.value = this.codeInput.value.toUpperCase().replace(/[^A-Z]/g, '');
+    });
     q('go').addEventListener('click', () => cb.onJoin(name(), this.codeInput.value.trim().toUpperCase()));
     this.nameInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') cb.onSolo(name());

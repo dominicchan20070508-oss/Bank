@@ -46,6 +46,7 @@ export type ClientMsg =
   | { type: 'honk' }
   | { type: 'debris'; kind: DebrisKind; p: Vec3; v: Vec3 }
   | { type: 'stat'; key: StatKey; delta: number }
+  | { type: 'ping'; t: number } // clock sync: the server answers with `pong` carrying its own clock
   | { type: 'debugGive'; orderId?: string }; // test hook; ignored unless the room allows debug
 
 // ---------------- server -> client ----------------
@@ -101,4 +102,5 @@ export type ServerMsg =
   | { type: 'snap'; t: number; players: Record<string, PlayerStateMsg> }
   | ({ type: 'event' } & GameEvent)
   | ResultsMsg
+  | { type: 'pong'; t: number; s: number } // t = the client's ping time echoed back, s = server clock (s)
   | { type: 'error'; msg: string };

@@ -407,11 +407,14 @@ export function generateCity(seed: number): CityMap {
     }
   }
   const allDoors: Door[] = [...restaurants.map((r) => r.door), ...customers.flatMap((c) => [c.front, c.back])];
+  // Two columns x two rows on the road just north of the centre crossing, all facing +z: teammates start side by side
+  // (player 2 a little behind player 1), so everybody sees everybody at the start.
+  const spawnX = roadLine(2);
   const spawns: Spawn[] = [
-    { x: roadLine(2), z: roadLine(2), heading: 0 },
-    { x: roadLine(3), z: roadLine(2), heading: 0 },
-    { x: roadLine(3), z: roadLine(3), heading: 0 },
-    { x: roadLine(2), z: roadLine(3), heading: 0 },
+    { x: spawnX - 3, z: roadLine(2) - 10, heading: 0 },
+    { x: spawnX + 3, z: roadLine(2) - 18, heading: 0 },
+    { x: spawnX + 3, z: roadLine(2) - 10, heading: 0 },
+    { x: spawnX - 3, z: roadLine(2) - 18, heading: 0 },
   ];
   const clearOfDoors = (x: number, z: number, min: number) => allDoors.every((d) => dist2(d.x, d.z, x, z) >= min * min);
   const clearOfSpawns = (x: number, z: number, min: number) => spawns.every((s) => dist2(s.x, s.z, x, z) >= min * min);

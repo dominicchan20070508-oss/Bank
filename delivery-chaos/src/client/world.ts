@@ -160,6 +160,7 @@ export class World {
   readonly customerMarker: TargetMarker;
   private readonly backDoorTags: Map<string, LabelSprite> = new Map();
   private readonly disposers: (() => void)[] = [];
+  private readonly fading: { sprite: THREE.Sprite; near: number }[] = [];
   private readonly sunOffset = new THREE.Vector3(38, 70, 26);
 
   constructor(
@@ -469,10 +470,12 @@ export class World {
     }
   }
 
-  private addSprite(ls: LabelSprite, x: number, y: number, z: number): void {
+  /** `fadeNear`: the sign is fully faded out at half this distance from the camera (so it never fills the screen) */
+  private addSprite(ls: LabelSprite, x: number, y: number, z: number, fadeNear = 0): void {
     ls.sprite.position.set(x, y, z);
     this.scene.add(ls.sprite);
     this.disposers.push(() => ls.dispose());
+    if (fadeNear > 0) this.fading.push({ sprite: ls.sprite, near: fadeNear });
   }
 
   private buildLandmarks(): void {
@@ -480,18 +483,18 @@ export class World {
     for (const r of map.restaurants) {
       const b = map.buildings[r.buildingId]!;
       this.doorMesh(r.door, 0xfff3d6, r.color);
-      this.addSprite(makeRestaurantSign(r), b.x, b.h + 3.4, b.z);
+      this.addSprite(makeRestaurantSign(r), b.x, b.h + 3.4, b.z, 34);
       // a shorter sign right above the entrance, visible from street level
       const doorSign = makeRestaurantSign(r);
       doorSign.sprite.scale.multiplyScalar(0.42);
-      this.addSprite(doorSign, r.door.wallX + r.door.nx * 1.5, 5.4, r.door.wallZ + r.door.nz * 1.5);
+      this.addSprite(doorSign, r.door.wallX + r.door.nx * 1.5, 5.4, r.door.wallZ + r.door.nz * 1.5, 16);
     }
     for (const c of map.customers) {
       this.doorMesh(c.front, 0x7a4a2b);
       this.doorMesh(c.back, 0x51606b);
-      this.addSprite(makeCustomerSign(c), c.front.wallX + c.front.nx * 0.6, 4.6, c.front.wallZ + c.front.nz * 0.6);
+      this.addSprite(makeCustomerSign(c), c.front.wallX + c.front.nx * 0.6, 4.6, c.front.wallZ + c.front.nz * 0.6, 24);
       const tag = makeSmallTag('后门', '#51606b');
-      this.addSprite(tag, c.back.wallX + c.back.nx * 0.6, 3.6, c.back.wallZ + c.back.nz * 0.6);
+      this.addSprite(tag, c.back.wallX + c.back.nx * 0.6, 3.6, c.back.wallZ + c.back.nz * 0.6, 16);
       this.backDoorTags.set(c.id, tag);
     }
   }
@@ -503,9 +506,17 @@ export class World {
     this.sun.target.updateMatrixWorld();
   }
 
-  update(t: number): void {
+  update(t: number, cam?: THREE.Vector3): void {
     for (const m of this.restaurantMarkers) m.update(t);
     this.customerMarker.update(t);
+    if (cam) {
+      for (const f of this.fading) {
+        const d = f.sprite.position.distanceTo(cam);
+        const a = Math.min(1, Math.max(0, (d - f.near * 0.5) / (f.near * 0.5)));
+        f.sprite.material.opacity = a;
+        f.sprite.visible = a > 0.02;
+      }
+    }
   }
 
   dispose(): void {

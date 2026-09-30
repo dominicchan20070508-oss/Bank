@@ -14,15 +14,21 @@ export interface Sample {
   cargo: CargoSummary | null;
 }
 
-export const INTERP_DELAY = 0.1; // s
+export const INTERP_DELAY = 0.15; // s (design says 100 ms; 20 Hz state + 20 Hz snapshot batching + network jitter needs a bit more)
 const KEEP = 1.5; // s of history
 const MAX_EXTRAPOLATE = 0.2; // s; beyond that the rider just stands still at the last known state
 
 const lerp = (a: number, b: number, k: number) => a + (b - a) * k;
 const lerpAngle = (a: number, b: number, k: number) => a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) * k;
 
-export function toSample(t: number, s: PlayerStateMsg): Sample {
-  return { t, x: s.p[0], y: s.p[1], z: s.p[2], h: s.h, l: s.l, v: s.v, crashed: s.crashed, cargo: s.cargo };
+const ok = (...v: number[]) => v.every(Number.isFinite);
+
+/** Never trust the network: anything non-finite makes the whole sample unusable (null). */
+export function toSample(t: number, s: PlayerStateMsg): Sample | null {
+  if (!s || !Array.isArray(s.p) || s.p.length !== 3 || !ok(t, s.p[0], s.p[1], s.p[2], s.h, s.l, s.v)) return null;
+  const c = s.cargo;
+  const cargo = c && typeof c === 'object' && ok(c.a, c.b, c.c) && (c.kind === 'soup' || c.kind === 'pizza' || c.kind === 'ice') ? { kind: c.kind, a: c.a, b: c.b, c: c.c } : null;
+  return { t, x: s.p[0], y: s.p[1], z: s.p[2], h: s.h, l: s.l, v: s.v, crashed: s.crashed === true, cargo };
 }
 
 export class InterpBuffer {

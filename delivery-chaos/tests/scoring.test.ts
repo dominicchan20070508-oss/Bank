@@ -72,15 +72,19 @@ describe('tip formula (DESIGN §7)', () => {
 
 describe('stars and awards', () => {
   it('thresholds scale with player count', () => {
-    expect(starThresholds(1)).toEqual([60, 110, 160]);
-    expect(starThresholds(3)).toEqual([180, 330, 480]);
-    expect(starsFor(59, 1)).toBe(0);
-    expect(starsFor(60, 1)).toBe(1);
-    expect(starsFor(110, 1)).toBe(2);
+    expect(starThresholds(1)).toEqual([110, 200, 290]);
+    expect(starThresholds(3)).toEqual([330, 600, 870]);
+    expect(starsFor(109, 1)).toBe(0);
+    expect(starsFor(110, 1)).toBe(1);
+    expect(starsFor(200, 1)).toBe(2);
+    expect(starsFor(289, 1)).toBe(2);
+    expect(starsFor(290, 1)).toBe(3);
     expect(starsFor(500, 1)).toBe(3);
-    expect(starsFor(200, 2)).toBe(1); // thresholds 120 / 220 / 320
-    expect(starsFor(220, 2)).toBe(2);
-    expect(starsFor(330, 2)).toBe(3);
+    // two players: 220 / 400 / 580
+    expect(starsFor(219, 2)).toBe(0);
+    expect(starsFor(300, 2)).toBe(1);
+    expect(starsFor(400, 2)).toBe(2);
+    expect(starsFor(580, 2)).toBe(3);
   });
 
   it('picks the standout player per category', () => {

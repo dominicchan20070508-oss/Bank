@@ -80,6 +80,7 @@ export class Game {
 
   phase: 'playing' | 'results' = 'playing';
   private disposed = false;
+  private frozen = false;
   private orders: Order[] = [];
   private teamTips = 0;
   private roster = new Map<string, RoomPlayerInfo>();
@@ -135,7 +136,7 @@ export class Game {
     const me = init.players[meIdx];
     const color = PLAYER_COLORS[me?.color ?? 0] ?? PLAYER_COLORS[0]!;
     this.bike = new BikeController(this.phys, this.map, 1 + meIdx * 7919);
-    this.bikeModel = new BikeModel(color, me?.name ?? '骑手');
+    this.bikeModel = new BikeModel(color); // no name tag on your own bike: it would sit over the view and the tip popup
     this.bikeModel.cargoMount.add(this.cargoView.group);
     this.debris = new DebrisManager(this.world.scene, this.phys);
     this.minimap = new Minimap(this.map);
@@ -180,6 +181,14 @@ export class Game {
     this.bikeModel.dispose();
     this.cargoView.dispose();
     this.world.dispose();
+  }
+
+  /** the connection died: stop simulating, keep the last picture on screen */
+  freeze(): void {
+    this.frozen = true;
+    this.deps.sfx.setEngine(0, 0, false);
+    this.deps.hud.setArrow(null);
+    this.deps.hud.setZone(null);
   }
 
   finish(_r: ResultsMsg): void {
@@ -278,7 +287,7 @@ export class Game {
             this.remotes.set(id, r);
           }
           const carried = this.orders.find((o) => o.carrierId === id && o.status === 'carrying');
-          r.push(msg.t, s, carried?.size ?? (s.cargo?.kind === 'ice' ? 3 : s.cargo?.kind === 'pizza' ? 5 : 1));
+          r.push(s, carried?.size ?? 0);
         }
         break;
       case 'event':
@@ -335,7 +344,8 @@ export class Game {
         if (ev.playerId !== this.me) {
           const dx = ev.p[0] - this.bike.pos.x;
           const dz = ev.p[2] - this.bike.pos.z;
-          this.deps.sfx.horn(Math.max(0.15, 1 - Math.hypot(dx, dz) / 90));
+          const dist = Math.hypot(dx, dz);
+          this.deps.sfx.horn(Number.isFinite(dist) ? Math.max(0.12, 1 - dist / 90) : 0.3); // quieter the farther away
         }
         if (ev.dog) {
           const o = this.orders.find((x) => x.id === ev.orderId);
@@ -366,7 +376,10 @@ export class Game {
         if (ev.playerId !== this.me) this.debris.spawn(ev.kind, ev.p, ev.v);
         break;
       case 'crash':
-        if (ev.playerId !== this.me) this.particles.burst(ev.p[0], 1, ev.p[2], 20, 0xffe08a, { spread: 5, life: 0.9 });
+        if (ev.playerId !== this.me && Number.isFinite(ev.p[0]) && Number.isFinite(ev.p[2])) {
+          this.particles.burst(ev.p[0], 1, ev.p[2], 20, 0xffe08a, { spread: 5, life: 0.9 });
+          this.deps.sfx.thud(0.6);
+        }
         break;
       default:
         break;
@@ -398,7 +411,7 @@ export class Game {
     if (this.disposed) return;
     this.adaptQuality(dt);
 
-    if (this.phase === 'playing') {
+    if (this.phase === 'playing' && !this.frozen) {
       this.acc += dt;
       let steps = 0;
       while (this.acc >= FIXED_DT && steps < VIEW.MAX_SUBSTEPS) {
@@ -706,12 +719,12 @@ export class Game {
       }
     }
 
-    for (const r of this.remotes.values()) r.update(dt, this.now());
+    for (const r of this.remotes.values()) r.update(dt, this.now(), this.chase.camera.position);
     this.debris.update(dt);
     this.particles.update(dt);
     this.chase.update(dt, it.x, it.y - BIKE.RADIUS, it.z, it.heading, bike.speed, this.map);
     this.world.followSun(this.tmpV.set(it.x, 0, it.z));
-    this.world.update(this.time);
+    this.world.update(this.time, this.chase.camera.position);
 
     this.updateGuidance(hud);
     hud.popups.update();
@@ -813,11 +826,13 @@ export class Game {
   // ------------------------------------------------------------------ test hooks (DESIGN §10.4)
   getState() {
     const b = this.bike;
-    const players = [
-      { id: this.me, name: this.nameOf(this.me), color: PLAYER_COLORS[this.roster.get(this.me)?.color ?? 0], pos: [b.pos.x, b.pos.y, b.pos.z] as [number, number, number], carrying: this.carrying?.order.id },
-    ];
-    for (const [id, r] of this.remotes) {
-      players.push({ id, name: r.info.name, color: PLAYER_COLORS[r.info.color], pos: r.pos, carrying: this.orders.find((o) => o.carrierId === id && o.status === 'carrying')?.id });
+    // everyone in the room, in join order; teammates' positions are sampled on demand from their interpolation buffers
+    const carrier = (id: string) => this.orders.find((o) => o.carrierId === id && o.status === 'carrying')?.id;
+    const players: { id: string; name: string; color: number; pos: [number, number, number]; carrying: string | undefined }[] = [];
+    for (const info of this.roster.values()) {
+      const color = PLAYER_COLORS[info.color] ?? PLAYER_COLORS[0]!;
+      if (info.id === this.me) players.push({ id: info.id, name: info.name, color, pos: [b.pos.x, b.pos.y, b.pos.z], carrying: this.carrying?.order.id ?? carrier(info.id) });
+      else players.push({ id: info.id, name: info.name, color, pos: this.remotes.get(info.id)?.positionAt(this.now()) ?? [0, 0, 0], carrying: carrier(info.id) });
     }
     const c = this.carrying;
     return {
@@ -826,7 +841,7 @@ export class Game {
       players,
       orders: this.orders,
       bike: { pos: [b.pos.x, b.pos.y, b.pos.z] as [number, number, number], heading: b.heading, speed: b.speed, lean: b.lean, crashed: b.crashed, airborne: b.airborne },
-      cargo: c ? { kind: c.cargo.kind, integrity: c.cargo.integrity, detail: c.cargo.detail } : null,
+      cargo: c ? { kind: c.cargo.kind, integrity: c.cargo.integrity, detail: c.cargo.detail, summary: c.cargo.summary() } : null,
       fps: Math.round(this.fps),
     };
   }

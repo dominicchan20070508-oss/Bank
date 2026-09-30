@@ -13,6 +13,8 @@ export interface Transport {
   send(msg: ClientMsg): void;
   /** Register a handler; returns an unsubscribe function. */
   onMessage(handler: MessageHandler): () => void;
+  /** The connection dropped without us asking (sockets only; the local transport never fires this). Returns an unsubscribe. */
+  onClose(handler: (reason: string) => void): () => void;
   /** Called every frame: lets time-driven transports (local room) tick. No-op for sockets. */
   update(): void;
   /** Current time (seconds) on the clock the room uses for order timers etc. */

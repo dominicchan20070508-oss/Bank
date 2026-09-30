@@ -1,14 +1,17 @@
 // Application shell: URL params, renderer, screens (menu / lobby / game / results) and the transport wiring.
 import * as THREE from 'three';
+import { PLAYER_COLORS } from '../shared/constants';
 import type { ClientMsg, ResultsMsg, RoomPhase, RoomPlayerInfo, ServerMsg } from '../shared/protocol';
 import { Sfx } from './audio';
 import { Game } from './game';
 import { Input } from './input';
 import { LocalTransport } from './net/localTransport';
 import type { Transport } from './net/transport';
+import { WsTransport } from './net/wsTransport';
 import { Hud } from './ui/hud';
 import { Lobby } from './ui/lobby';
 import { Menu, loadName } from './ui/menu';
+import { Notice } from './ui/notice';
 import { Results } from './ui/results';
 import './ui/style.css';
 
@@ -66,6 +69,7 @@ export class App {
   private readonly menu: Menu;
   private readonly lobby: Lobby;
   private readonly results: Results;
+  private readonly notice: Notice;
   private transport: Transport | null = null;
   private unsub: (() => void) | null = null;
   private game: Game | null = null;
@@ -75,6 +79,7 @@ export class App {
   private solo = false;
   private wantAutostart = false;
   private lastResults: ResultsMsg | null = null;
+  private disconnected = false;
 
   constructor(private readonly params: UrlParams) {
     const ui = document.getElementById('ui')!;
@@ -92,17 +97,25 @@ export class App {
     this.renderer = renderer;
     this.sfx = new Sfx(!params.nosfx);
     this.hud = new Hud(ui, params.debug);
+    this.notice = new Notice(ui, () => this.toMenu());
     this.menu = new Menu(
       ui,
       {
         onSolo: (name) => void this.startSolo(name, true),
-        onCreate: () => this.menu.showSoon(),
-        onJoin: () => this.menu.showSoon(),
+        onCreate: (name) => void this.startOnline('create', name),
+        onJoin: (name, code) => {
+          if (!/^[A-Z]{4}$/.test(code)) this.notice.toast('请输入4位房间码');
+          else void this.startOnline('join', name, code);
+        },
       },
       params.name ?? loadName(),
-      false, // online play arrives in Phase B
+      true,
     );
-    this.lobby = new Lobby(ui, { onStart: () => this.transport?.send({ type: 'startGame', ...this.startOverrides() }), onLeave: () => this.toMenu() });
+    this.lobby = new Lobby(ui, {
+      onStart: () => this.transport?.send({ type: 'startGame', ...this.startOverrides() }),
+      onLeave: () => this.toMenu(),
+      onCopyInvite: (code) => void this.copyInvite(code),
+    });
     this.results = new Results(ui);
     this.input.attach();
     const unlock = () => this.sfx.unlock();
@@ -116,10 +129,12 @@ export class App {
     if (p.solo) {
       this.menu.hide();
       void this.startSolo(p.name ?? loadName(), p.autostart);
-    } else if (p.room || p.create) {
-      // Phase B wires these to wsTransport; for now the menu explains it.
-      this.menu.show();
-      this.menu.showSoon();
+    } else if (p.create) {
+      this.menu.hide();
+      void this.startOnline('create', p.name ?? loadName());
+    } else if (p.room) {
+      this.menu.hide();
+      void this.startOnline('join', p.name ?? loadName(), p.room);
     } else {
       this.menu.show();
     }
@@ -147,6 +162,63 @@ export class App {
     await t.connect(name);
   }
 
+  private async startOnline(mode: 'create' | 'join', name: string, code = ''): Promise<void> {
+    if (!this.renderer) {
+      this.menu.show();
+      alert('你的浏览器不支持 WebGL，无法运行游戏。');
+      return;
+    }
+    this.teardown();
+    this.solo = false;
+    this.wantAutostart = false;
+    this.menu.hide();
+    const t = new WsTransport();
+    this.attach(t);
+    t.onClose((reason) => this.onDisconnected(reason));
+    try {
+      await t.connect(name);
+    } catch (err) {
+      if (this.transport === t) {
+        this.toMenu();
+        this.notice.toast(err instanceof Error ? err.message : '无法连接服务器');
+      }
+      return;
+    }
+    if (this.transport !== t) return; // the user left while we were connecting
+    t.send(mode === 'create' ? { type: 'createRoom' } : { type: 'joinRoom', code });
+  }
+
+  private onDisconnected(reason: string): void {
+    this.disconnected = true;
+    this.game?.freeze();
+    this.input.enabled = false;
+    this.notice.showDisconnected(reason === '连接断开' ? '与服务器的连接已断开，这局无法继续了。' : reason);
+  }
+
+  private async copyInvite(code: string): Promise<void> {
+    const link = `${window.location.origin}/?room=${code}`;
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(link);
+      ok = true;
+    } catch {
+      // clipboard API needs https / localhost: fall back to a temporary textarea
+      const ta = document.createElement('textarea');
+      ta.value = link;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.append(ta);
+      ta.select();
+      try {
+        ok = document.execCommand('copy');
+      } catch {
+        ok = false;
+      }
+      ta.remove();
+    }
+    this.notice.toast(ok ? `已复制邀请链接：${link}` : `请手动复制：${link}`);
+  }
+
   private attach(t: Transport): void {
     this.transport = t;
     this.unsub = t.onMessage((m) => this.onMessage(m));
@@ -161,9 +233,12 @@ export class App {
     this.transport?.close();
     this.transport = null;
     this.room = null;
+    this.myId = '';
     this.lastResults = null;
+    this.disconnected = false;
     this.results.hide();
     this.lobby.hide();
+    this.notice.hideDisconnected();
     this.input.enabled = true;
   }
 
@@ -183,22 +258,10 @@ export class App {
       case 'welcome':
         this.myId = msg.id;
         break;
-      case 'room': {
+      case 'room':
         this.room = { code: msg.code, hostId: msg.hostId, phase: msg.phase, players: msg.players };
-        if (msg.phase === 'lobby') {
-          this.game?.dispose();
-          this.game = null;
-          this.results.hide();
-          if (this.wantAutostart) {
-            this.wantAutostart = false;
-            this.transport?.send({ type: 'startGame', ...this.startOverrides() });
-          } else {
-            this.phase = 'lobby';
-            this.lobby.show({ code: msg.code, solo: this.solo, hostId: msg.hostId, myId: this.myId, players: msg.players });
-          }
-        }
+        this.onRoom(this.room);
         break;
-      }
       case 'start':
         this.beginGame(msg);
         break;
@@ -206,13 +269,14 @@ export class App {
         this.lastResults = msg;
         this.phase = 'results';
         this.game?.finish(msg);
-        this.results.show(msg, this.myId, this.isHost(), {
-          onRestart: () => this.restart(),
-          onMenu: () => this.toMenu(),
-        });
+        this.showResults();
         break;
       case 'error':
-        this.hud.popups.toast(msg.msg);
+        if (!this.room && this.transport?.kind === 'ws') {
+          // couldn't get into a room (wrong code, full, already playing ...): back to the menu with the reason
+          this.toMenu();
+        }
+        this.notice.toast(msg.msg);
         break;
       default:
         break;
@@ -220,14 +284,40 @@ export class App {
     this.game?.handleMessage(msg);
   }
 
+  private onRoom(room: RoomInfo): void {
+    if (room.phase === 'playing') return; // the running game tracks its own roster
+    if (room.phase === 'results' && this.phase === 'results' && this.lastResults) {
+      this.showResults(); // the host may have changed: refresh the buttons
+      return;
+    }
+    // lobby, or we joined between rounds: wait in the lobby for the host
+    this.game?.dispose();
+    this.game = null;
+    this.results.hide();
+    if (this.wantAutostart) {
+      this.wantAutostart = false;
+      this.transport?.send({ type: 'startGame', ...this.startOverrides() });
+      return;
+    }
+    this.phase = 'lobby';
+    this.lobby.show({ code: room.code, solo: this.solo, hostId: room.hostId, myId: this.myId, players: room.players });
+  }
+
+  private showResults(): void {
+    if (!this.lastResults) return;
+    this.results.show(this.lastResults, this.myId, this.isHost(), {
+      onRestart: () => this.restart(),
+      onMenu: () => this.toMenu(),
+    });
+  }
+
   private isHost(): boolean {
     return this.room?.hostId === this.myId;
   }
 
+  /** host's "再来一局": straight into a fresh round for everybody (no detour through the lobby) */
   private restart(): void {
-    this.results.hide();
-    if (this.solo) this.wantAutostart = true;
-    this.transport?.send({ type: 'backToLobby' });
+    this.transport?.send({ type: 'startGame', ...this.startOverrides() });
   }
 
   private beginGame(msg: Extract<ServerMsg, { type: 'start' }>): void {
@@ -256,13 +346,15 @@ export class App {
       roomCode: this.room?.code,
       myId: this.myId || undefined,
       results: this.lastResults ?? undefined,
+      disconnected: this.disconnected || undefined,
     };
     if (!g) {
       return {
         ...base,
         timeLeft: 0,
         teamTips: 0,
-        players: [] as unknown[],
+        // lobby / menu: the roster from the room (no positions yet)
+        players: (this.room?.players ?? []).map((p) => ({ id: p.id, name: p.name, color: PLAYER_COLORS[p.color] ?? 0, pos: [0, 0, 0] as [number, number, number], carrying: undefined as string | undefined })),
         orders: [] as unknown[],
         bike: { pos: [0, 0, 0], heading: 0, speed: 0, lean: 0, crashed: false, airborne: false },
         cargo: null,

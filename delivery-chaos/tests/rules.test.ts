@@ -411,16 +411,180 @@ describe('end of round', () => {
     expect(b.room.players.get('p1')!.carrying).toBeNull();
   });
 
-  it('snapshots are relayed at ~20 Hz to multi-player rooms', () => {
+  it('snapshots go out at ~20 Hz (50 ms ticks, a little jitter) and only carry riders that sent something new', () => {
     const { room, log } = mkRoom(2);
     room.start(0, 1);
-    at(room, 'p1', 1, 2);
-    at(room, 'p2', 3, 4);
-    for (let t = 0; t < 1; t += 0.01) room.tick(t);
-    const snaps = log.filter((l) => l.msg.type === 'snap');
-    expect(snaps.length).toBeGreaterThanOrEqual(18);
-    expect(snaps.length).toBeLessThanOrEqual(22);
-    const last = snaps[snaps.length - 1]!.msg as Extract<ServerMsg, { type: 'snap' }>;
-    expect(Object.keys(last.players).sort()).toEqual(['p1', 'p2']);
+    const jitter = [0.002, -0.003, 0.004, -0.001, 0.003];
+    let n = 0;
+    for (let t = 0.05; t < 2.0; t += 0.05) {
+      const now = t + jitter[n++ % jitter.length]!;
+      at(room, 'p1', t, 2, 0, now);
+      if (n % 2 === 0) at(room, 'p2', 3, t, 0, now); // p2 reports at 10 Hz
+      room.tick(now);
+    }
+    const snaps = log.filter((l) => l.msg.type === 'snap').map((l) => l.msg as Extract<ServerMsg, { type: 'snap' }>);
+    expect(snaps.length).toBeGreaterThanOrEqual(36);
+    expect(snaps.length).toBeLessThanOrEqual(42);
+    expect(snaps.every((s) => 'p1' in s.players)).toBe(true);
+    expect(snaps.filter((s) => 'p2' in s.players).length).toBeLessThan(snaps.length * 0.7); // only when it was updated
+  });
+});
+
+describe('relayed data is validated (one bad client must not crash its teammates)', () => {
+  const ok = { kind: 'pizza', p: [1, 2, 3], v: [1, 2, 3] };
+  const debrisTo = (log: { msg: ServerMsg }[]) => eventsOf(log, 'debris');
+  const send = (room: GameRoom, id: string, msg: unknown, now = 1) => room.handle(id, msg as ClientMsg, now);
+
+  function twoPlayers() {
+    const ctx = mkRoom(2);
+    ctx.room.start(0, 1);
+    return ctx;
+  }
+
+  it('debris: well-formed messages are relayed to the others (not back to the sender)', () => {
+    const { room, log } = twoPlayers();
+    send(room, 'p1', { type: 'debris', ...ok });
+    expect(debrisTo(log)).toHaveLength(1);
+    expect(debrisTo(log)[0]).toMatchObject({ playerId: 'p1', kind: 'pizza', p: [1, 2, 3], v: [1, 2, 3] });
+  });
+
+  it('debris: bad kind, NaN, wrong length, missing or absurd values are dropped', () => {
+    const { room, log } = twoPlayers();
+    const bad = [
+      { type: 'debris', kind: 'bomb', p: [1, 2, 3], v: [1, 2, 3] },
+      { type: 'debris', kind: 42, p: [1, 2, 3], v: [1, 2, 3] },
+      { type: 'debris', kind: 'pizza', p: [1, NaN, 3], v: [1, 2, 3] },
+      { type: 'debris', kind: 'pizza', p: [1, 2, 3], v: [1, Infinity, 3] },
+      { type: 'debris', kind: 'pizza', p: [1, 2], v: [1, 2, 3] },
+      { type: 'debris', kind: 'pizza', p: [1, 2, 3, 4], v: [1, 2, 3] },
+      { type: 'debris', kind: 'pizza', p: [1, 2, 3] },
+      { type: 'debris', kind: 'pizza', p: 'x', v: [1, 2, 3] },
+      { type: 'debris', kind: 'pizza', p: [1e9, 0, 0], v: [1, 2, 3] },
+      { type: 'debris', kind: 'pizza', p: [null, 0, 0], v: [1, 2, 3] },
+      { type: 'debris', kind: 'pizza', p: ['1', 0, 0], v: [1, 2, 3] },
+    ];
+    for (const b of bad) send(room, 'p1', b);
+    expect(debrisTo(log)).toHaveLength(0);
+  });
+
+  it('debris: speed is clamped to 40 m/s, direction kept', () => {
+    const { room, log } = twoPlayers();
+    send(room, 'p1', { type: 'debris', kind: 'scoop', p: [0, 1, 0], v: [300, 400, 0] });
+    const v = debrisTo(log)[0]!.v;
+    expect(Math.hypot(v[0], v[1], v[2])).toBeCloseTo(40, 5);
+    expect(v[1] / v[0]).toBeCloseTo(4 / 3, 5);
+  });
+
+  it('debris: rate limited to ~15 per second per player, and the allowance refills', () => {
+    const { room, log } = twoPlayers();
+    for (let i = 0; i < 100; i++) send(room, 'p1', { type: 'debris', ...ok }, 1 + i * 0.001); // a burst within 0.1 s
+    expect(debrisTo(log).length).toBeLessThanOrEqual(16);
+    expect(debrisTo(log).length).toBeGreaterThanOrEqual(14);
+    const before = debrisTo(log).length;
+    // a second player is unaffected, and p1 is allowed again a second later
+    send(room, 'p2', { type: 'debris', ...ok }, 1.2);
+    send(room, 'p1', { type: 'debris', ...ok }, 2.5);
+    expect(debrisTo(log).length).toBe(before + 2);
+    // sustained 100/s for 3 s -> about 15/s gets through
+    const { room: r2, log: l2 } = twoPlayers();
+    for (let i = 0; i < 300; i++) send(r2, 'p1', { type: 'debris', ...ok }, 1 + i * 0.01);
+    expect(debrisTo(l2).length).toBeGreaterThan(40);
+    expect(debrisTo(l2).length).toBeLessThan(65);
+  });
+
+  it('debris: ignored outside a running round', () => {
+    const { room, log } = mkRoom(2);
+    send(room, 'p1', { type: 'debris', ...ok }, 1);
+    expect(debrisTo(log)).toHaveLength(0);
+  });
+
+  it('state: cargo is rebuilt into the known summary shape, junk becomes null', () => {
+    const { room, log } = twoPlayers();
+    const state = (cargo: unknown, extra: Record<string, unknown> = {}) =>
+      send(room, 'p1', { type: 'state', t: 1, p: [1, 0.5, 2], h: 0, l: 0, v: 3, crashed: false, cargo, ...extra }, 1);
+    let tickAt = 1;
+    const lastSnapCargo = () => {
+      room.tick((tickAt += 0.1)); // one snapshot per call
+      const snaps = log.filter((l) => l.msg.type === 'snap');
+      const s = snaps[snaps.length - 1]?.msg as Extract<ServerMsg, { type: 'snap' }> | undefined;
+      return s?.players.p1?.cargo;
+    };
+    state({ kind: 'pizza', a: 3, b: 0.2, c: -0.1, evil: 'x'.repeat(1000), __proto__: { x: 1 } });
+    expect(lastSnapCargo()).toEqual({ kind: 'pizza', a: 3, b: 0.2, c: -0.1 });
+    for (const junk of [{ kind: 'bomb', a: 1, b: 0, c: 0 }, { kind: 'soup', a: NaN, b: 0, c: 0 }, { kind: 'soup', a: 1, b: 'x', c: 0 }, { kind: 'soup', a: 1 }, 'soup', 42, [], { kind: 7, a: 1, b: 1, c: 1 }]) {
+      state(junk);
+      expect(lastSnapCargo()).toBeNull();
+    }
+    // out-of-range numbers are clamped rather than trusted
+    state({ kind: 'ice', a: 1e9, b: -1e9, c: 1e9 });
+    expect(lastSnapCargo()).toEqual({ kind: 'ice', a: 50, b: -5, c: 5 });
+  });
+
+  it('state: t, position, heading, lean and speed must be finite, otherwise the message is ignored', () => {
+    const { room } = twoPlayers();
+    const base = { type: 'state', p: [1, 0.5, 2], h: 0, l: 0, v: 3, crashed: false, cargo: null };
+    const stored = () => room.players.get('p1')!.state;
+    send(room, 'p1', { ...base, t: 1 });
+    expect(stored()?.p).toEqual([1, 0.5, 2]);
+    send(room, 'p1', { ...base, t: 1, p: [9, 0.5, 9], v: NaN });
+    send(room, 'p1', { ...base, t: NaN, p: [9, 0.5, 9] });
+    send(room, 'p1', { ...base, t: undefined, p: [9, 0.5, 9] });
+    send(room, 'p1', { ...base, t: Infinity, p: [9, 0.5, 9] });
+    send(room, 'p1', { ...base, t: '1', p: [9, 0.5, 9] });
+    send(room, 'p1', { ...base, t: 1, p: [9, 0.5, NaN] });
+    send(room, 'p1', { ...base, t: 1, h: Infinity, p: [9, 0.5, 9] });
+    send(room, 'p1', { ...base, t: 1, l: null, p: [9, 0.5, 9] });
+    send(room, 'p1', { ...base, t: 1, p: [9, 0.5], h: 0 });
+    expect(stored()?.p).toEqual([1, 0.5, 2]); // none of them got through
+  });
+
+  it('state: a wildly wrong timestamp is replaced by the server clock', () => {
+    const { room } = twoPlayers();
+    send(room, 'p1', { type: 'state', t: 99999, p: [1, 0.5, 2], h: 0, l: 0, v: 3, crashed: false, cargo: null }, 5);
+    expect(room.players.get('p1')!.state!.t).toBe(5);
+    send(room, 'p1', { type: 'state', t: 5.2, p: [1, 0.5, 2], h: 0, l: 0, v: 3, crashed: false, cargo: null }, 5);
+    expect(room.players.get('p1')!.state!.t).toBe(5.2);
+  });
+
+  it('honk: broadcasts are limited to ~4/s per player, but every honk is counted', () => {
+    const { room, log } = twoPlayers();
+    at(room, 'p1', 0, 0, 0, 1);
+    for (let i = 0; i < 40; i++) room.handle('p1', { type: 'honk' }, 1 + i * 0.01); // 40 honks in 0.4 s
+    const heard = eventsOf(log, 'honk');
+    expect(heard.length).toBeLessThanOrEqual(5);
+    expect(heard.length).toBeGreaterThanOrEqual(3);
+    expect(room.players.get('p1')!.stats.honks).toBe(40);
+    // sustained: 10 honks/s for 3 s -> about 4/s audible (+ the initial burst allowance)
+    const { room: r2, log: l2 } = twoPlayers();
+    at(r2, 'p1', 0, 0, 0, 1);
+    for (let i = 0; i < 30; i++) r2.handle('p1', { type: 'honk' }, 1 + i * 0.1);
+    expect(eventsOf(l2, 'honk').length).toBeGreaterThan(9);
+    expect(eventsOf(l2, 'honk').length).toBeLessThanOrEqual(16);
+    expect(r2.players.get('p1')!.stats.honks).toBe(30);
+  });
+
+  it('honk: the noHorn rule is enforced on every honk, and the dog is announced even when the spam is throttled', () => {
+    const { room, log } = mkRoom(1);
+    room.start(0, 1);
+    const o = pick(room, { request: 'noHorn', distance: 100, timeLimit: 40 });
+    const r = room.map!.restaurants.find((x) => x.id === o.restaurantId)!;
+    at(room, 'p1', r.door.x, r.door.z, 0, 0);
+    room.handle('p1', { type: 'pickup', orderId: o.id }, 0);
+    const door = targetDoor(room.map!, o);
+    at(room, 'p1', door.x + 50, door.z, 5, 1);
+    for (let i = 0; i < 10; i++) room.handle('p1', { type: 'honk' }, 1 + i * 0.001); // burns the allowance far from the house
+    at(room, 'p1', door.x + 10, door.z, 5, 1.01);
+    room.handle('p1', { type: 'honk' }, 1.011); // throttled, but it wakes the dog
+    expect(o.honkedNear).toBe(true);
+    expect(eventsOf(log, 'honk').some((e) => e.dog)).toBe(true);
+  });
+
+  it('names and hello are sanitised', () => {
+    const { room } = mkRoom(1);
+    room.handle('p1', { type: 'hello', name: '  <b>超级长的名字超级长的名字超级长的名字</b>  ' }, 0);
+    expect(room.players.get('p1')!.name.length).toBeLessThanOrEqual(12);
+    expect(room.players.get('p1')!.name).not.toMatch(/[<>]/);
+    room.handle('p1', { type: 'hello', name: { evil: true } } as unknown as ClientMsg, 0);
+    expect(room.players.get('p1')!.name).toBe('骑手1');
   });
 });
