@@ -1,0 +1,13 @@
+# Render Blueprint: one-click deploy of 外卖大乱送 (Delivery Chaos) as a single web service
+# (static client + WebSocket server on the same port).
+services:
+  - type: web
+    name: delivery-chaos
+    runtime: node
+    plan: free
+    rootDir: delivery-chaos
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
