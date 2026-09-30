@@ -29,7 +29,7 @@
 
 ```
 git clone https://github.com/dominicchan20070508-oss/Bank.git D:\Bank
-cd D:\Bank\delivery-chaos
+cd /d D:\Bank\delivery-chaos
 ```
 
 ### 3. 安装并启动
@@ -70,7 +70,7 @@ npm start
 最简单的办法是用 Cloudflare 的临时隧道，不用注册、不用改路由器。**保持游戏窗口（`npm start`）开着**，再开一个新的 `cmd` 窗口：
 
 ```
-cd D:\Bank\delivery-chaos
+cd /d D:\Bank\delivery-chaos
 npx cloudflared tunnel --url http://localhost:8080
 ```
 
