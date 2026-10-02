@@ -39,7 +39,7 @@ try {
   await A.page.screenshot({ path: `${OUT}/qa-lobby.png` });
 
   // host starts via the UI button
-  const startBtn = A.page.getByRole('button', { name: /开始/ });
+  const startBtn = A.page.getByRole('button', { name: /开始|Start/i });
   await startBtn.click();
   await Promise.all([A, B].map(({ page }) => page.waitForFunction(() => window.__game.getState().phase === 'playing', null, { timeout: 20000 })));
   check('both enter playing', true);
