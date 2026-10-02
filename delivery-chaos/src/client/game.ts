@@ -2,7 +2,7 @@
 // cargo models, the world, the HUD and the transport. Game RULES (orders, tips, timers) live in shared/rules.ts and
 // are only *reported to* / *received from* the transport here.
 import * as THREE from 'three';
-import { BIKE, CARGO, GAME, PLAYER_COLORS, VIEW, ZONE } from '../shared/constants';
+import { AUDIO, BIKE, CARGO, GAME, PLAYER_COLORS, TOUCH, VIEW, ZONE } from '../shared/constants';
 import { doorOf, generateCity, type CityMap, type Door } from '../shared/map';
 import { REQUEST_INFO, targetDoor, type Order } from '../shared/orders';
 import type { GameEvent, RejectReason, ResultsMsg, RoomPlayerInfo, ServerMsg, StatKey } from '../shared/protocol';
@@ -19,7 +19,9 @@ import type { Transport } from './net/transport';
 import { Particles } from './particles';
 import { RemoteBike } from './remoteBike';
 import { createPhysics, FIXED_DT, type PhysicsWorld } from './physics';
-import type { Hud } from './ui/hud';
+import { formatCargoStatus, formatQuote, formatTipParts, placeName, playerName, t } from './i18n';
+import type { TouchControls } from './touch';
+import { isCompactScreen, type Hud, type ScreenRect } from './ui/hud';
 import { World } from './world';
 
 export interface GameDeps {
@@ -30,6 +32,10 @@ export interface GameDeps {
   input: Input;
   debug: boolean;
   shadows: boolean;
+  /** on-screen controls (phones), or null on desktop */
+  touch?: TouchControls | null;
+  /** phone performance profile: fewer particles */
+  lowPower?: boolean;
   /** shadows are skipped on software GL (headless / no GPU) because they more than halve the frame rate; ?shadows forces them on */
   forceShadows?: boolean;
 }
@@ -55,14 +61,14 @@ interface ZoneTarget {
   door: Door;
 }
 
-const REJECT_TEXT: Partial<Record<RejectReason, string>> = {
-  taken: '被别人抢先了！',
-  busy: '先把手上的单送完！',
-  far: '再靠近一点',
-  fast: '再停稳一点',
+const REJECT_KEYS: Partial<Record<RejectReason, 'reject.taken' | 'reject.busy' | 'reject.far' | 'reject.fast'>> = {
+  taken: 'reject.taken',
+  busy: 'reject.busy',
+  far: 'reject.far',
+  fast: 'reject.fast',
 };
 
-const SPILL_WORDS = ['哗啦！', '哗啦！', '洒了洒了！', '汤汤汤！'];
+const SPILL_KEYS = ['float.spill.1', 'float.spill.1', 'float.spill.2', 'float.spill.3'] as const;
 const hex = (c: number) => '#' + c.toString(16).padStart(6, '0');
 const d2 = (ax: number, az: number, bx: number, bz: number) => (ax - bx) * (ax - bx) + (az - bz) * (az - bz);
 
@@ -106,6 +112,12 @@ export class Game {
   private statFlushAt = 0;
   private spillAcc = 0;
   private spillPopupAt = -99;
+  private spillSoundAcc = 0;
+  private spillSoundAt = -99;
+  private hudRects: ScreenRect[] = [];
+  private hudRectsAt = -99;
+  /** QA counters (window.__game.debug.counters) */
+  readonly counters = { honks: 0, resets: 0 };
   private hudAcc = 0;
   private lastHonkAt = -99;
   private lastLandPopup = -99;
@@ -139,7 +151,8 @@ export class Game {
     this.bikeModel = new BikeModel(color); // no name tag on your own bike: it would sit over the view and the tip popup
     this.bikeModel.cargoMount.add(this.cargoView.group);
     this.debris = new DebrisManager(this.world.scene, this.phys);
-    this.minimap = new Minimap(this.map);
+    this.minimap = new Minimap(this.map, deps.lowPower ? 132 : 176);
+    if (deps.lowPower) this.particles.countScale = TOUCH.PARTICLE_SCALE;
     this.world.scene.add(this.bikeModel.root, this.particles.points);
     for (const r of this.map.restaurants) this.restaurantDoors.set(r.id, r.door);
 
@@ -147,6 +160,7 @@ export class Game {
     this.bike.place(sp.x, sp.z, sp.heading);
     this.chase.snapTo(sp.x, 0.5, sp.z, sp.heading);
     deps.hud.mountMinimap(this.minimap.canvas);
+    deps.touch?.setVisible(true);
     deps.hud.popups.project = (x, y, z) => this.project(x, y, z);
     deps.hud.setVisible(true);
     deps.hud.setTips(0, init.players.length);
@@ -154,7 +168,7 @@ export class Game {
     this.resize();
     window.addEventListener('resize', this.onResize);
     this.sendState();
-    deps.hud.popups.floatText('出发！', { color: '#ffe08a', size: 'big', jitter: 0 });
+    deps.hud.popups.floatText(t('float.go'), { color: '#ffe08a', size: 'big', jitter: 0 });
   }
 
   // ------------------------------------------------------------------ lifecycle
@@ -173,6 +187,7 @@ export class Game {
     window.removeEventListener('resize', this.onResize);
     this.deps.hud.popups.project = null;
     this.deps.hud.setVisible(false);
+    this.deps.touch?.setVisible(false);
     this.deps.sfx.setEngine(0, 0, false);
     this.remotes.forEach((r) => r.dispose());
     this.remotes.clear();
@@ -186,6 +201,7 @@ export class Game {
   /** the connection died: stop simulating, keep the last picture on screen */
   freeze(): void {
     this.frozen = true;
+    this.deps.touch?.setVisible(false);
     this.deps.sfx.setEngine(0, 0, false);
     this.deps.hud.setArrow(null);
     this.deps.hud.setZone(null);
@@ -194,6 +210,7 @@ export class Game {
   finish(_r: ResultsMsg): void {
     this.phase = 'results';
     this.deps.input.enabled = false;
+    this.deps.touch?.setVisible(false);
     this.deps.hud.setArrow(null);
     this.deps.hud.setZone(null);
     this.deps.sfx.setEngine(0, 0, false);
@@ -216,7 +233,8 @@ export class Game {
     return this.init.myId;
   }
   private nameOf(id: string): string {
-    return this.roster.get(id)?.name ?? '骑手';
+    const info = this.roster.get(id);
+    return info ? playerName(info) : t('player.default', { n: '' }).trim();
   }
   timeLeft(): number {
     return this.phase === 'playing' ? Math.max(0, this.init.startTime + this.init.duration - this.now()) : 0;
@@ -315,8 +333,8 @@ export class Game {
         this.cargoView.apply(this.carrying.cargo.summary());
         this.deps.sfx.pickup();
         const cu = this.map.customers.find((c) => c.id === o.customerId)!;
-        this.deps.hud.popups.floatText('取到餐啦！', { world: this.above(2.6), color: '#7dff9b' });
-        this.deps.hud.popups.toast(`送去 ${cu.name}${o.request ? ' · ' + REQUEST_INFO[o.request].text : ''}`);
+        this.deps.hud.popups.floatText(t('float.pickup'), { world: this.above(2.6), color: '#7dff9b' });
+        this.deps.hud.popups.toast(t('toast.deliverTo', { dest: placeName(cu), req: o.request ? ' · ' + t(`req.${o.request}.text`) : '' }));
         this.particles.burst(this.bike.pos.x, 1.2, this.bike.pos.z, 14, 0x7dff9b, { spread: 3, life: 0.7, gravity: 6 });
         break;
       }
@@ -324,15 +342,15 @@ export class Game {
         const cu = this.map.customers.find((c) => c.id === ev.customerId)!;
         const door = ev.request === 'backDoor' ? cu.back : cu.front;
         const wall: [number, number, number] = [door.wallX + door.nx * 0.8, 4.2, door.wallZ + door.nz * 0.8];
-        this.deps.hud.popups.bubble(ev.quote, wall, cu.name, 3200);
+        this.deps.hud.popups.bubble(formatQuote(ev.quote), wall, placeName(cu), 3200);
         this.deps.sfx.chime();
         for (let k = 0; k < 4; k++) {
           const colors = [0xffc93c, 0xe63946, 0x2a7de1, 0x2fbf71];
           this.particles.burst(door.x, 1.5, door.z, 10, colors[k]!, { spread: 4.5, dir: [0, 5, 0], life: 1.3, gravity: 9 });
         }
         if (ev.playerId === this.me) {
-          this.deps.hud.popups.tip(ev.tip, ev.parts.join(' · '), `${cu.name} 收到了外卖`);
-          if (ev.request === 'noHorn' && ev.requestOk === false) this.deps.hud.popups.floatText('狗被吵醒了！', { color: '#ff8a8a', size: 'small', jitter: 10 });
+          this.deps.hud.popups.tip(ev.tip, formatTipParts(ev.parts), t('tipcard.who', { dest: placeName(cu) }));
+          if (ev.request === 'noHorn' && ev.requestOk === false) this.deps.hud.popups.floatText(t('float.dogWoke'), { color: '#ff8a8a', size: 'small', jitter: 10 });
           this.pending = null;
           this.dropCargo();
         }
@@ -352,18 +370,19 @@ export class Game {
           const cu = o ? this.map.customers.find((c) => c.id === o.customerId) : undefined;
           this.deps.sfx.dogBark();
           const at: [number, number, number] = cu ? [cu.front.wallX, 3, cu.front.wallZ] : this.above(3);
-          this.deps.hud.popups.floatText('汪汪汪！', { world: at, color: '#ffd35c', size: 'big', jitter: 20 });
-          this.deps.hud.popups.bubble('汪！汪！汪！', at, '🐕 狗被吵醒了', 2200);
+          this.deps.hud.popups.floatText(t('float.dog'), { world: at, color: '#ffd35c', size: 'big', jitter: 20 });
+          this.deps.hud.popups.bubble(t('bubble.dog'), at, t('bubble.dogWho'), 2200);
         }
         break;
       }
       case 'reject': {
         this.pending = null;
         this.dwell = 0;
-        let text = REJECT_TEXT[ev.reason];
+        const rk = REJECT_KEYS[ev.reason];
+        let text = rk ? t(rk) : undefined;
         if (ev.reason === 'wrongDoor') {
           const o = this.carrying?.order;
-          text = o?.request === 'backDoor' ? '走错门啦！这单要送后门' : '走错门啦！请送正门';
+          text = t(o?.request === 'backDoor' ? 'reject.wrongDoor.back' : 'reject.wrongDoor.front');
         }
         if (ev.reason === 'notCarrier' && this.carrying && this.carrying.order.id === ev.orderId) this.dropCargo();
         if (text) {
@@ -443,7 +462,10 @@ export class Game {
   private fixedStep(dt: number): void {
     const input = this.deps.input;
     if (input.consumeReset()) {
-      if (this.bike.reset()) this.deps.hud.popups.floatText('扶正！', { world: this.above(2.4), color: '#9bd7ff', size: 'small' });
+      if (this.bike.reset()) {
+        this.counters.resets++;
+        this.deps.hud.popups.floatText(t('float.reset'), { world: this.above(2.4), color: '#9bd7ff', size: 'small' });
+      }
     }
     if (input.consumeHonk()) this.honk();
 
@@ -479,8 +501,9 @@ export class Game {
   private honk(): void {
     if (this.time - this.lastHonkAt < BIKE.HONK_COOLDOWN) return;
     this.lastHonkAt = this.time;
+    this.counters.honks++;
     this.deps.sfx.horn();
-    this.deps.hud.popups.floatText('嘟嘟！', { world: this.above(2.6), color: '#ffe08a', size: 'small', jitter: 12 });
+    this.deps.hud.popups.floatText(t('float.honk'), { world: this.above(2.6), color: '#ffe08a', size: 'small', jitter: 12 });
     const c = this.carrying;
     if (c && c.order.request === 'noHorn') {
       const d = targetDoor(this.map, c.order);
@@ -494,7 +517,7 @@ export class Game {
     const p = this.bike.pos;
     switch (e.type) {
       case 'crash': {
-        hud.popups.floatText('翻车啦！', { world: this.above(2.2), color: '#ff6b6b', size: 'big', jitter: 10 });
+        hud.popups.floatText(t('float.crash'), { world: this.above(2.2), color: '#ff6b6b', size: 'big', jitter: 10 });
         hud.popups.flash();
         this.chase.addShake(VIEW.SHAKE_CRASH);
         this.deps.sfx.crash();
@@ -511,7 +534,7 @@ export class Game {
         this.chase.addShake(VIEW.SHAKE_HIT * Math.min(1, e.speed / 8));
         this.deps.sfx.thud(Math.min(1, e.speed / 8));
         this.particles.burst(p.x + e.nx * 0.5, 0.7, p.z + e.nz * 0.5, 10, 0xffdd66, { spread: 2.5, life: 0.5 });
-        if (e.speed > 4.5) hud.popups.floatText('砰！', { world: this.above(2.4), color: '#ffe08a', size: 'small', jitter: 30 });
+        if (e.speed > 4.5) hud.popups.floatText(t('float.bang'), { world: this.above(2.4), color: '#ffe08a', size: 'small', jitter: 30 });
         break;
       case 'bump':
         this.deps.sfx.thud(Math.min(1, e.strength / 60));
@@ -524,7 +547,7 @@ export class Game {
         this.stat('maxAirTime', e.airTime);
         if (e.airTime > 0.4 && this.time - this.lastLandPopup > 1) {
           this.lastLandPopup = this.time;
-          hud.popups.floatText(`滞空 ${e.airTime.toFixed(1)} 秒！`, { world: this.above(2.6), color: '#9bd7ff', size: 'small' });
+          hud.popups.floatText(t('float.air', { s: e.airTime.toFixed(1) }), { world: this.above(2.6), color: '#9bd7ff', size: 'small' });
         }
         break;
       case 'reset':
@@ -566,15 +589,25 @@ export class Game {
             const a = Math.random() * Math.PI * 2;
             this.debris.spawn('drop', [pos.x, pos.y + 0.3, pos.z], [v.x * 0.6 + Math.cos(a) * 3, 3 + Math.random() * 3, v.z * 0.6 + Math.sin(a) * 3], 3);
           }
-          this.deps.sfx.splash(1);
+          this.deps.sfx.spill(1, true);
           this.spillAcc = 0;
+          this.spillSoundAcc = 0;
+          this.spillSoundAt = this.time;
           this.spillPopupAt = this.time;
-          hud.popups.floatText('哗啦！', { world: this.above(3.2), color: '#ffb84d', jitter: 30 });
-        } else if (this.spillAcc > 0.05 && this.time - this.spillPopupAt > 1.1) {
-          this.spillPopupAt = this.time;
-          hud.popups.floatText(SPILL_WORDS[Math.floor(Math.random() * SPILL_WORDS.length)]!, { world: this.above(3.0), color: '#ffb84d' });
-          this.deps.sfx.splash(Math.min(1, this.spillAcc * 3));
-          this.spillAcc = 0;
+          hud.popups.floatText(t('float.splash'), { world: this.above(3.2), color: '#ffb84d', jitter: 30 });
+        } else {
+          // a continuous spill: a light drip tick, or a real splash only for a big gulp; never faster than the sfx gap
+          this.spillSoundAcc += e.amount;
+          if (this.spillSoundAcc > 0.004 && this.time - this.spillSoundAt >= AUDIO.SPLASH_MIN_GAP_MS / 1000) {
+            this.spillSoundAt = this.time;
+            this.deps.sfx.spill(this.spillSoundAcc);
+            this.spillSoundAcc = 0;
+          }
+          if (this.spillAcc > 0.05 && this.time - this.spillPopupAt > 1.1) {
+            this.spillPopupAt = this.time;
+            hud.popups.floatText(t(SPILL_KEYS[Math.floor(Math.random() * SPILL_KEYS.length)]!), { world: this.above(3.0), color: '#ffb84d' });
+            this.spillAcc = 0;
+          }
         }
         break;
       }
@@ -590,7 +623,7 @@ export class Game {
         this.send({ type: 'debris', kind: 'pizza', p: [pos.x, pos.y, pos.z], v: vel });
         this.stat('pizzasLost', 1);
         if (!fromCrash || e.index === 0) {
-          hud.popups.floatText('披萨飞了！', { world: this.above(3.2), color: '#ffd35c', jitter: 30 });
+          hud.popups.floatText(t('float.pizza'), { world: this.above(3.2), color: '#ffd35c', jitter: 30 });
           this.deps.sfx.pop();
         }
         break;
@@ -601,7 +634,7 @@ export class Game {
         this.debris.spawn('scoop', [pos.x, pos.y, pos.z], vel, 5);
         this.send({ type: 'debris', kind: 'scoop', p: [pos.x, pos.y, pos.z], v: vel });
         this.stat('scoopsLost', 1);
-        hud.popups.floatText('冰淇淋掉了！', { world: this.above(3.2), color: '#ff9cc8', jitter: 30 });
+        hud.popups.floatText(t('float.scoop'), { world: this.above(3.2), color: '#ff9cc8', jitter: 30 });
         this.deps.sfx.pop();
         break;
       }
@@ -654,7 +687,7 @@ export class Game {
       else this.wrongDwell = 0;
       if (this.wrongDwell > 0.6 && this.time - this.wrongHintAt > 4) {
         this.wrongHintAt = this.time;
-        this.deps.hud.popups.toast(c.order.request === 'backDoor' ? '走错门啦！这单要送后门' : '走错门啦！请送正门');
+        this.deps.hud.popups.toast(t(c.order.request === 'backDoor' ? 'reject.wrongDoor.back' : 'reject.wrongDoor.front'));
       }
     } else this.wrongDwell = 0;
   }
@@ -731,9 +764,11 @@ export class Game {
 
     // HUD text (cheap)
     hud.setTime(this.timeLeft());
-    hud.setSpeed(bike.speed, Math.max(0, 1 - bike.resetCooldown / BIKE.RESET_COOLDOWN));
-    if (c) hud.setCargo({ kind: c.cargo.kind, integrity: c.cargo.integrity, detail: c.cargo.detail }, this.cargoHint(c));
-    else hud.setCargo(null, this.orders.some((o) => o.status === 'waiting') ? '去亮起的餐厅停下取餐' : '等待新订单…');
+    const resetReady = Math.max(0, 1 - bike.resetCooldown / BIKE.RESET_COOLDOWN);
+    hud.setSpeed(bike.speed, resetReady);
+    deps.touch?.setResetReady(resetReady);
+    if (c) hud.setCargo({ kind: c.cargo.kind, integrity: c.cargo.integrity, detail: formatCargoStatus(c.cargo.status) }, this.cargoHint(c));
+    else hud.setCargo(null, t(this.orders.some((o) => o.status === 'waiting') ? 'hud.hintPickup' : 'hud.hintWait'));
     this.hudAcc += dt;
     if (this.hudAcc > 0.1) {
       this.hudAcc = 0;
@@ -757,7 +792,7 @@ export class Game {
       hud.setDebug(
         `FPS ${this.fps.toFixed(0)}  calls ${deps.renderer.info.render.calls}  tris ${(deps.renderer.info.render.triangles / 1000).toFixed(0)}k  debris ${this.debris.count}  px ${this.pixelRatio.toFixed(2)}  shadows ${deps.renderer.shadowMap.enabled ? 'on' : 'off'}${this.softwareGL ? '  [software GL]' : ''}\n` +
           `pos ${bike.pos.x.toFixed(1)},${bike.pos.z.toFixed(1)}  v ${bike.speed.toFixed(1)}  lean ${bike.lean.toFixed(2)}  air ${bike.airborne ? bike.airTime.toFixed(2) : '-'}\n` +
-          `aLocal ${bike.aLocal.x.toFixed(1)}, ${bike.aLocal.y.toFixed(1)}, ${bike.aLocal.z.toFixed(1)}  dwell ${this.dwell.toFixed(2)}  ${c ? c.cargo.detail : 'no cargo'}`,
+          `aLocal ${bike.aLocal.x.toFixed(1)}, ${bike.aLocal.y.toFixed(1)}, ${bike.aLocal.z.toFixed(1)}  dwell ${this.dwell.toFixed(2)}  ${c ? formatCargoStatus(c.cargo.status) : 'no cargo'}`,
       );
     }
 
@@ -766,8 +801,17 @@ export class Game {
 
   private cargoHint(c: Carrying): string {
     const cu = this.map.customers.find((x) => x.id === c.order.customerId)!;
-    const req = c.order.request ? ` · ${REQUEST_INFO[c.order.request].icon} ${REQUEST_INFO[c.order.request].short}` : '';
-    return `送往 ${cu.name}${req}`;
+    const req = c.order.request ? ` · ${REQUEST_INFO[c.order.request].icon} ${t(`req.${c.order.request}.short`)}` : '';
+    return t('hud.hintDeliver', { dest: placeName(cu), req });
+  }
+
+  /** HUD panels + touch buttons the target arrow must stay out of (re-measured a few times a second) */
+  private panelRects(): ScreenRect[] {
+    if (this.time - this.hudRectsAt > 0.3) {
+      this.hudRectsAt = this.time;
+      this.hudRects = [...this.deps.hud.rects(), ...(this.deps.touch?.rects() ?? [])];
+    }
+    return this.hudRects;
   }
 
   /** pillars, minimap-independent screen guidance: edge arrow + zone progress ring */
@@ -797,9 +841,9 @@ export class Game {
         let dx = inView.x;
         let dy = -inView.y;
         if (Math.abs(dx) < 1e-3 && Math.abs(dy) < 1e-3) dy = 1;
-        const m = 70;
-        const t = Math.min((W / 2 - m) / Math.max(1e-6, Math.abs(dx)), (H / 2 - m) / Math.max(1e-6, Math.abs(dy)));
-        const [ax, ay] = avoidHud(W / 2 + dx * t, H / 2 + dy * t, W, H, m);
+        const m = isCompactScreen() ? 44 : 70;
+        const k = Math.min((W / 2 - m) / Math.max(1e-6, Math.abs(dx)), (H / 2 - m) / Math.max(1e-6, Math.abs(dy)));
+        const [ax, ay] = avoidHud(W / 2 + dx * k, H / 2 + dy * k, W, H, m, this.panelRects());
         hud.setArrow({
           x: ax,
           y: ay,
@@ -818,7 +862,7 @@ export class Game {
         x: p.x,
         y: p.y,
         progress: this.pending ? 1 : this.dwell / ZONE.DWELL,
-        label: this.pending ? '…' : slow ? (this.zone.kind === 'pickup' ? '取餐中' : '交货中') : '刹车停下！',
+        label: this.pending ? '…' : slow ? t(this.zone.kind === 'pickup' ? 'zone.pickup' : 'zone.deliver') : t('zone.stop'),
       });
     } else hud.setZone(null);
   }
@@ -841,7 +885,9 @@ export class Game {
       players,
       orders: this.orders,
       bike: { pos: [b.pos.x, b.pos.y, b.pos.z] as [number, number, number], heading: b.heading, speed: b.speed, lean: b.lean, crashed: b.crashed, airborne: b.airborne },
-      cargo: c ? { kind: c.cargo.kind, integrity: c.cargo.integrity, detail: c.cargo.detail, summary: c.cargo.summary() } : null,
+      cargo: c ? { kind: c.cargo.kind, integrity: c.cargo.integrity, detail: formatCargoStatus(c.cargo.status), summary: c.cargo.summary() } : null,
+      input: { ...this.deps.input.last },
+      counters: { ...this.counters },
       fps: Math.round(this.fps),
     };
   }
@@ -862,12 +908,14 @@ export class Game {
       return d ? [d.x, d.z] : null;
     },
     honk: () => this.honk(),
+    /** screen rectangles of the HUD panels and touch buttons (QA: nothing may overlap the buttons) */
+    hudRects: () => ({ hud: this.deps.hud.rects(), touch: this.deps.touch?.rects() ?? [] }),
     /** static map summary for test scripts (positions in metres) */
     map: () => ({
       seed: this.map.seed,
       half: this.map.half,
-      restaurants: this.map.restaurants.map((r) => ({ id: r.id, name: r.name, food: r.food, x: r.door.x, z: r.door.z })),
-      customers: this.map.customers.map((c) => ({ id: c.id, name: c.name, front: [c.front.x, c.front.z], back: [c.back.x, c.back.z] })),
+      restaurants: this.map.restaurants.map((r) => ({ id: r.id, name: r.name, nameEn: r.nameEn, food: r.food, x: r.door.x, z: r.door.z })),
+      customers: this.map.customers.map((c) => ({ id: c.id, name: c.name, nameEn: c.nameEn, front: [c.front.x, c.front.z], back: [c.back.x, c.back.z] })),
       ramps: this.map.ramps.map((r) => ({ x: r.x, z: r.z, dir: r.dir, len: r.len, width: r.width, height: r.height })),
       bumps: this.map.bumps.map((b) => ({ x: b.x, z: b.z, w: b.w, d: b.d })),
       obstacles: this.map.obstacles.map((o) => ({ x: o.x, z: o.z, kind: o.kind })),
@@ -884,31 +932,33 @@ export class Game {
   };
 }
 
-/** Keep the edge arrow out of the HUD panels: slide it along the screen edge to the nearest free spot. */
-function avoidHud(x: number, y: number, W: number, H: number, m: number): [number, number] {
-  const panels: [number, number, number, number][] = [
-    [W - 320, 0, W, 340], // order cards
-    [0, 0, 240, 160], // time / tips
-    [W - 210, H - 210, W, H], // minimap
-    [0, H - 110, 270, H], // speed
-    [W / 2 - 230, H - 120, W / 2 + 230, H], // cargo
-  ];
-  for (const [x0, y0, x1, y1] of panels) {
-    if (x > x0 - 30 && x < x1 + 30 && y > y0 - 30 && y < y1 + 30) {
-      // push out through the cheapest side that keeps us on screen
-      const opts: [number, number, number][] = [
-        [x0 - 40, y, Math.abs(x - (x0 - 40))],
-        [x1 + 40, y, Math.abs(x - (x1 + 40))],
-        [x, y0 - 40, Math.abs(y - (y0 - 40))],
-        [x, y1 + 40, Math.abs(y - (y1 + 40))],
-      ];
-      opts.sort((a, b) => a[2] - b[2]);
-      for (const [ox, oy] of opts) {
-        if (ox >= m && ox <= W - m && oy >= m && oy <= H - m) return [ox, oy];
-      }
+/**
+ * Keep the edge arrow out of the HUD panels and touch buttons: if the ideal spot is covered, slide it along the
+ * (inset) screen border to the nearest spot that is free.
+ */
+function avoidHud(x: number, y: number, W: number, H: number, m: number, panels: ScreenRect[]): [number, number] {
+  const pad = 36; // half the arrow plus a little air
+  const hit = (px: number, py: number) => panels.some((r) => px > r.x0 - pad && px < r.x1 + pad && py > r.y0 - pad && py < r.y1 + pad);
+  if (!hit(x, y)) return [x, y];
+  let best: [number, number] | null = null;
+  let bestD = Infinity;
+  const step = 8;
+  const consider = (px: number, py: number) => {
+    const d = (px - x) * (px - x) + (py - y) * (py - y);
+    if (d < bestD && !hit(px, py)) {
+      bestD = d;
+      best = [px, py];
     }
+  };
+  for (let px = m; px <= W - m; px += step) {
+    consider(px, m);
+    consider(px, H - m);
   }
-  return [x, y];
+  for (let py = m; py <= H - m; py += step) {
+    consider(m, py);
+    consider(W - m, py);
+  }
+  return best ?? [x, y];
 }
 
 function isSoftwareRenderer(renderer: THREE.WebGLRenderer): boolean {

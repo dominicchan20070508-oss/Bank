@@ -2,7 +2,7 @@
 // JSON over WebSocket at /ws; `type` discriminates every message.
 import type { FoodKind } from './map';
 import type { Order } from './orders';
-import type { Award, PlayerStats } from './scoring';
+import type { Award, PlayerStats, QuoteKey, TipPart } from './scoring';
 
 export type Vec3 = [number, number, number];
 
@@ -60,6 +60,8 @@ export interface PlayerResult extends RoomPlayerInfo {
   stats: PlayerStats;
 }
 
+export type ErrorCode = 'notFound' | 'playing' | 'full' | 'inRoom' | 'noRoom' | 'busy' | 'debugOff';
+
 export type RejectReason = 'taken' | 'busy' | 'far' | 'fast' | 'wrongDoor' | 'notCarrier' | 'state' | 'phase';
 
 export type GameEvent =
@@ -75,9 +77,8 @@ export type GameEvent =
       integrity: number;
       tip: number;
       teamTips: number;
-      parts: string[];
-      summary: string;
-      quote: string;
+      parts: TipPart[]; // structured: the client formats them in its own language
+      quote: QuoteKey; // i18n key of the customer's reaction
       onTime: boolean;
     }
   | { ev: 'expire'; orderId: string }
@@ -103,4 +104,4 @@ export type ServerMsg =
   | ({ type: 'event' } & GameEvent)
   | ResultsMsg
   | { type: 'pong'; t: number; s: number } // t = the client's ping time echoed back, s = server clock (s)
-  | { type: 'error'; msg: string };
+  | { type: 'error'; code: ErrorCode }; // the client turns the code into text in its own language (i18n `err.*`)

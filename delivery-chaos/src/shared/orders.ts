@@ -8,17 +8,19 @@ export type OrderStatus = 'waiting' | 'carrying' | 'delivered' | 'expired';
 
 export const REQUEST_IDS: readonly RequestId[] = ['noHorn', 'gentle', 'backDoor', 'rush'];
 
-export const REQUEST_INFO: Record<RequestId, { text: string; short: string; icon: string }> = {
-  noHorn: { text: '不要按门铃，狗在睡觉', short: '别按喇叭', icon: '🐕' },
-  gentle: { text: '轻拿轻放，奶奶在午睡', short: '别翻车', icon: '👵' },
-  backDoor: { text: '放后门，别走正门', short: '送后门', icon: '🚪' },
-  rush: { text: '饿死了！快点！！', short: '加急', icon: '🔥' },
+/** Language-neutral request data. The texts live in the client i18n tables (`req.<id>.text` / `req.<id>.short`). */
+export const REQUEST_INFO: Record<RequestId, { icon: string }> = {
+  noHorn: { icon: '🐕' },
+  gentle: { icon: '👵' },
+  backDoor: { icon: '🚪' },
+  rush: { icon: '🔥' },
 };
 
-export const FOOD_INFO: Record<FoodKind, { name: string; unit: string; icon: string }> = {
-  soup: { name: '汤', unit: '碗', icon: '🍲' },
-  pizza: { name: '披萨', unit: '盒', icon: '🍕' },
-  ice: { name: '冰淇淋', unit: '球', icon: '🍦' },
+/** Food icons; names / units live in the client i18n tables (`food.<kind>`, `unit.<kind>`). */
+export const FOOD_INFO: Record<FoodKind, { icon: string }> = {
+  soup: { icon: '🍲' },
+  pizza: { icon: '🍕' },
+  ice: { icon: '🍦' },
 };
 
 export interface Order {

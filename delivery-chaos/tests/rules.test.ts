@@ -226,7 +226,9 @@ describe('delivery, tips and special requests', () => {
     expect(ev.tip).toBe(19);
     expect(room.teamTips).toBe(19);
     expect(ev.teamTips).toBe(19);
-    expect(ev.summary).toContain('完整度 80%');
+    expect(ev.parts[0]).toEqual({ key: 'tip.integrity', pct: 80 });
+    expect(ev.parts[1]).toEqual({ key: 'tip.early', secs: 20 });
+    expect(ev.quote).toBe('quote.ok');
     expect(o.status).toBe('delivered');
     const st = room.players.get('p1')!.stats;
     expect(st).toMatchObject({ deliveries: 1, tips: 19 });
@@ -251,7 +253,7 @@ describe('delivery, tips and special requests', () => {
   it('zero integrity is delivered but pays nothing', () => {
     const { room, log, o } = carry(1, { request: null });
     deliver(room, o, { integrity: 0 });
-    expect(eventsOf(log, 'deliver')[0]).toMatchObject({ tip: 0, quote: '我的外卖呢？？' });
+    expect(eventsOf(log, 'deliver')[0]).toMatchObject({ tip: 0, quote: 'quote.none' });
     expect(room.teamTips).toBe(0);
     expect(o.status).toBe('delivered');
   });
@@ -585,6 +587,71 @@ describe('relayed data is validated (one bad client must not crash its teammates
     expect(room.players.get('p1')!.name.length).toBeLessThanOrEqual(12);
     expect(room.players.get('p1')!.name).not.toMatch(/[<>]/);
     room.handle('p1', { type: 'hello', name: { evil: true } } as unknown as ClientMsg, 0);
-    expect(room.players.get('p1')!.name).toBe('骑手1');
+    expect(room.players.get('p1')!.name).toBe(''); // unnamed: each client shows its own language's "Rider 1"
   });
 });
+
+describe('i18n: the rules emit codes and numbers, never Chinese sentences (DESIGN §13.1)', () => {
+  const CJK = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/;
+
+  it('a full round (pickup, delivery with a request, honk near a dog, results) sends no CJK text from the rules', () => {
+    // ASCII player names: those are the only user-typed text that may legitimately travel
+    const log: { to: string | '*'; msg: ServerMsg }[] = [];
+    const room = new GameRoom({ code: 'TEST', send: (id, msg) => log.push({ to: id, msg }), broadcast: (msg) => log.push({ to: '*', msg }), allowStartOverrides: true, allowDebug: true });
+    room.addPlayer('p1', 'Alex');
+    room.addPlayer('p2', ''); // unnamed
+    room.start(0, 3, 60);
+    const o = pick(room, { request: 'noHorn', distance: 100, timeLimit: 50, food: 'pizza', size: 3 });
+    const r = room.map!.restaurants.find((x) => x.id === o.restaurantId)!;
+    at(room, 'p1', r.door.x, r.door.z, 0, 1);
+    room.handle('p1', { type: 'pickup', orderId: o.id }, 1);
+    const door = targetDoor(room.map!, o);
+    at(room, 'p1', door.x + 3, door.z, 0, 5);
+    room.handle('p1', { type: 'honk' }, 5); // wakes the dog
+    at(room, 'p1', door.x, door.z, 0, 10);
+    room.handle('p1', { type: 'deliver', orderId: o.id, integrity: 0.5, crashedDuring: false, honkedNear: true }, 10);
+    room.handle('p2', { type: 'stat', key: 'crashes', delta: 1 }, 11);
+    room.handle('p2', { type: 'pickup', orderId: 'nope' }, 12); // a reject
+    room.tick(61);
+    expect(room.phase).toBe('results');
+
+    const text = JSON.stringify(log.map((l) => l.msg));
+    expect(text).not.toMatch(CJK);
+    const d = eventsOf(log, 'deliver')[0]!;
+    expect(d.parts.map((p) => p.key)).toEqual(['tip.integrity', 'tip.early', 'tip.noHorn.fail']);
+    expect(d.quote).toBe('quote.mid.pizza');
+    expect(room.players.get('p2')!.name).toBe('');
+    const res = log.find((l) => l.msg.type === 'results')!.msg as ResultsMsg;
+    for (const a of res.awards) {
+      expect(a).not.toHaveProperty('title');
+      expect(a).not.toHaveProperty('detail');
+      expect(typeof a.value).toBe('number');
+    }
+  });
+
+  it('the map carries both languages for every restaurant and customer', async () => {
+    const map = generateCity(11);
+    for (const r of map.restaurants) {
+      expect(r.name).toMatch(CJK);
+      expect(r.nameEn).not.toMatch(CJK);
+      expect(r.nameEn.length).toBeGreaterThan(2);
+    }
+    for (const c of map.customers) {
+      expect(c.name).toMatch(CJK);
+      expect(c.nameEn).toMatch(/^Bldg \d+ · [A-Z]/);
+      expect(c.nameEn).not.toMatch(CJK);
+    }
+    expect(map.restaurants.map((r) => r.nameEn)).toEqual(["Wang's Soup House", 'Uncle Pizza', 'Chill Desserts']);
+  });
+
+  it('adding English names did not change the generated city (the shuffle is permutation-stable)', () => {
+    const a = generateCity(1);
+    // customer i keeps the same house number and the same Chinese name as the v0.1 generator would give; spot-check determinism
+    const b = generateCity(1);
+    expect(a.customers.map((c) => c.name)).toEqual(b.customers.map((c) => c.name));
+    expect(a.customers.map((c) => c.nameEn)).toEqual(b.customers.map((c) => c.nameEn));
+    // zh and en agree on the building number
+    for (const c of a.customers) expect(c.nameEn.startsWith(`Bldg ${c.houseNo} ·`)).toBe(true);
+  });
+});
+

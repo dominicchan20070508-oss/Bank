@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { MAP, VIEW } from '../shared/constants';
+import { t } from './i18n';
 import { blockCentre, roadLine, type CityMap, type Door } from '../shared/map';
 import { bumpGeometry, polyToTriangles, rampAngle, rampGeometry } from './physics';
 import { makeCustomerSign, makeRestaurantSign, makeSmallTag, type LabelSprite } from './sprites';
@@ -493,7 +494,7 @@ export class World {
       this.doorMesh(c.front, 0x7a4a2b);
       this.doorMesh(c.back, 0x51606b);
       this.addSprite(makeCustomerSign(c), c.front.wallX + c.front.nx * 0.6, 4.6, c.front.wallZ + c.front.nz * 0.6, 24);
-      const tag = makeSmallTag('后门', '#51606b');
+      const tag = makeSmallTag(t('door.back'), '#51606b');
       this.addSprite(tag, c.back.wallX + c.back.nx * 0.6, 3.6, c.back.wallZ + c.back.nz * 0.6, 16);
       this.backDoorTags.set(c.id, tag);
     }

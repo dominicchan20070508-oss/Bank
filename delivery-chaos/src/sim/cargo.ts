@@ -25,6 +25,11 @@ export type CargoEvent =
   /** an ice-cream scoop fell off. index = its slot (0 = bottom). */
   | { type: 'scoopLost'; index: number; remaining: number; crash: boolean };
 
+export type CargoStatus =
+  | { kind: 'soup'; pct: number }
+  | { kind: 'pizza'; boxes: number; size: number }
+  | { kind: 'ice'; scoops: number; size: number; meltPct: number };
+
 export const NO_EVENTS: readonly CargoEvent[] = Object.freeze([]) as readonly CargoEvent[];
 
 export interface Cargo {
@@ -33,8 +38,8 @@ export interface Cargo {
   readonly size: number;
   /** 0..1 */
   readonly integrity: number;
-  /** HUD text: "汤 68%", "披萨 3/4", "冰淇淋 2/3 · 融化 40%" */
-  readonly detail: string;
+  /** HUD status as data ("Soup 68%", "Pizza 3/4", "Ice cream 2/3 · melted 40%"): the client formats it in its language */
+  readonly status: CargoStatus;
   update(dt: number, aLocal: ALocal, lean: number, speed: number): readonly CargoEvent[];
   /** the bike crashed: apply the crash penalty and report what came off */
   onCrash(): readonly CargoEvent[];
@@ -61,8 +66,8 @@ export class SoupCargo implements Cargo {
   get integrity(): number {
     return this.level;
   }
-  get detail(): string {
-    return `汤 ${Math.round(this.level * 100)}%`;
+  get status(): CargoStatus {
+    return { kind: 'soup', pct: Math.round(this.level * 100) };
   }
 
   update(dt: number, a: ALocal, lean: number, _speed: number): readonly CargoEvent[] {
@@ -132,8 +137,8 @@ export class PizzaCargo implements Cargo {
   get integrity(): number {
     return this.boxes / this.size;
   }
-  get detail(): string {
-    return `披萨 ${this.boxes}/${this.size}`;
+  get status(): CargoStatus {
+    return { kind: 'pizza', boxes: this.boxes, size: this.size };
   }
 
   update(dt: number, a: ALocal, lean: number, _speed: number): readonly CargoEvent[] {
@@ -208,8 +213,8 @@ export class IceCargo implements Cargo {
   get integrity(): number {
     return (this.scoops / this.size) * (1 - CARGO.ICE.MELT_PENALTY * this.melt);
   }
-  get detail(): string {
-    return `冰淇淋 ${this.scoops}/${this.size} · 融化 ${Math.round(this.melt * 100)}%`;
+  get status(): CargoStatus {
+    return { kind: 'ice', scoops: this.scoops, size: this.size, meltPct: Math.round(this.melt * 100) };
   }
 
   update(dt: number, a: ALocal, lean: number, speed: number): readonly CargoEvent[] {

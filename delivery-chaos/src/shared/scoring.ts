@@ -45,16 +45,30 @@ export interface TipBreakdown {
   onTime: boolean;
   secondsDelta: number; // +early / -late (whole seconds)
   reqBonus: number;
-  parts: string[]; // human readable pieces (Simplified Chinese)
-  summary: string; // "+¥23  完整度 72% · 提前 18s · 狗被吵醒 −8"
+  /** structured pieces of the tip line; the client turns each into text in its own language (i18n `tip.*` keys) */
+  parts: TipPart[];
 }
 
-const REQ_LABEL: Record<RequestId, { ok: string; fail: string }> = {
-  noHorn: { ok: '没吵醒小狗', fail: '狗被吵醒' },
-  gentle: { ok: '轻拿轻放', fail: '奶奶被吓醒' },
-  backDoor: { ok: '后门送达', fail: '走错门' },
-  rush: { ok: '火速送达', fail: '太慢了' },
-};
+export type TipPartKey =
+  | 'tip.integrity'
+  | 'tip.early'
+  | 'tip.late'
+  | 'tip.noHorn.ok'
+  | 'tip.noHorn.fail'
+  | 'tip.gentle.ok'
+  | 'tip.gentle.fail'
+  | 'tip.backDoor.ok'
+  | 'tip.backDoor.fail'
+  | 'tip.rush.ok'
+  | 'tip.rush.fail';
+
+/** One piece of the tip breakdown: a message key plus numeric params (pct: 0..100, secs: whole seconds, bonus: signed tip points). */
+export interface TipPart {
+  key: TipPartKey;
+  pct?: number;
+  secs?: number;
+  bonus?: number;
+}
 
 export function computeTip(i: TipInput): TipBreakdown {
   const integrity = Math.min(1, Math.max(0, i.integrity));
@@ -68,12 +82,9 @@ export function computeTip(i: TipInput): TipBreakdown {
   const tip = integrity <= 0 ? 0 : Math.max(0, Math.round(raw));
   const secondsDelta = Math.round(i.timeLimit - i.elapsed);
 
-  const parts: string[] = [`完整度 ${Math.round(integrity * 100)}%`];
-  parts.push(onTime ? `提前 ${Math.max(0, secondsDelta)}s` : `超时 ${Math.abs(secondsDelta)}s`);
-  if (i.request) {
-    const label = REQ_LABEL[i.request];
-    parts.push(`${i.requestOk ? label.ok : label.fail} ${reqBonus >= 0 ? '+' : '−'}${Math.abs(reqBonus)}`);
-  }
+  const parts: TipPart[] = [{ key: 'tip.integrity', pct: Math.round(integrity * 100) }];
+  parts.push(onTime ? { key: 'tip.early', secs: Math.max(0, secondsDelta) } : { key: 'tip.late', secs: Math.abs(secondsDelta) });
+  if (i.request) parts.push({ key: `tip.${i.request}.${i.requestOk ? 'ok' : 'fail'}`, bonus: reqBonus });
   return {
     tip,
     base,
@@ -83,21 +94,18 @@ export function computeTip(i: TipInput): TipBreakdown {
     secondsDelta,
     reqBonus,
     parts,
-    summary: `+¥${tip}  ${parts.join(' · ')}`,
   };
 }
 
-/** Customer's reaction when the food arrives (DESIGN §7). */
-export function integrityQuote(food: FoodKind, integrity: number): string {
-  if (integrity <= 0) return '我的外卖呢？？';
-  if (integrity >= 0.9) return '五星好评！';
-  if (integrity >= 0.6) return '还行吧…';
-  if (integrity >= 0.3) {
-    if (food === 'soup') return '汤怎么只剩一半？';
-    if (food === 'pizza') return '披萨怎么少了几盒？';
-    return '冰淇淋怎么都化了？';
-  }
-  return '这是什么鬼？？';
+export type QuoteKey = 'quote.none' | 'quote.five' | 'quote.ok' | 'quote.mid.soup' | 'quote.mid.pizza' | 'quote.mid.ice' | 'quote.bad';
+
+/** Customer's reaction when the food arrives (DESIGN §7), as an i18n key. */
+export function integrityQuote(food: FoodKind, integrity: number): QuoteKey {
+  if (integrity <= 0) return 'quote.none';
+  if (integrity >= 0.9) return 'quote.five';
+  if (integrity >= 0.6) return 'quote.ok';
+  if (integrity >= 0.3) return `quote.mid.${food}`;
+  return 'quote.bad';
 }
 
 export function starThresholds(playerCount: number): number[] {
@@ -110,38 +118,32 @@ export function starsFor(teamTips: number, playerCount: number): number {
 
 // ---------- awards ----------
 
+export type AwardId = 'tips' | 'crash' | 'soup' | 'air' | 'honk' | 'steady';
+
+/** An end-of-round award. Titles / detail lines are rendered by the client from `id` and `value` (i18n `award.*`). */
 export interface Award {
-  id: string;
+  id: AwardId;
   icon: string;
-  title: string;
   playerId: string;
-  playerName: string;
-  detail: string;
+  playerName: string; // as the player typed it ('' = unnamed: the client shows "Rider N")
+  /** tips: ¥; crash / honk: count; soup: bowls; air: seconds; steady: average integrity 0..1 */
+  value: number;
 }
 
 interface AwardDef {
-  id: string;
+  id: AwardId;
   icon: string;
-  title: string;
   value: (s: PlayerStats) => number;
   min: number;
-  detail: (v: number) => string;
 }
 
 const AWARD_DEFS: AwardDef[] = [
-  { id: 'tips', icon: '💰', title: '小费王', value: (s) => s.tips, min: 1, detail: (v) => `赚了 ¥${Math.round(v)}` },
-  { id: 'crash', icon: '💥', title: '翻车王', value: (s) => s.crashes, min: 1, detail: (v) => `翻车 ${v} 次` },
-  { id: 'soup', icon: '🍲', title: '洒汤王', value: (s) => s.soupSpilled, min: 0.2, detail: (v) => `洒了 ${v.toFixed(1)} 碗汤` },
-  { id: 'air', icon: '🛫', title: '飞行员', value: (s) => s.maxAirTime, min: 0.5, detail: (v) => `最长滞空 ${v.toFixed(1)} 秒` },
-  { id: 'honk', icon: '📯', title: '喇叭狂魔', value: (s) => s.honks, min: 3, detail: (v) => `按了 ${v} 次喇叭` },
-  {
-    id: 'steady',
-    icon: '🛡️',
-    title: '最稳车手',
-    value: (s) => (s.deliveries > 0 ? s.integritySum / s.deliveries : 0),
-    min: 0.001,
-    detail: (v) => `平均完整度 ${Math.round(v * 100)}%`,
-  },
+  { id: 'tips', icon: '💰', value: (s) => s.tips, min: 1 },
+  { id: 'crash', icon: '💥', value: (s) => s.crashes, min: 1 },
+  { id: 'soup', icon: '🍲', value: (s) => s.soupSpilled, min: 0.2 },
+  { id: 'air', icon: '🛫', value: (s) => s.maxAirTime, min: 0.5 },
+  { id: 'honk', icon: '📯', value: (s) => s.honks, min: 3 },
+  { id: 'steady', icon: '🛡️', value: (s) => (s.deliveries > 0 ? s.integritySum / s.deliveries : 0), min: 0.001 },
 ];
 
 /** Pick up to `max` awards, best matching player per category; ties go to the earlier player. */
@@ -153,7 +155,7 @@ export function pickAwards(players: { id: string; name: string; stats: PlayerSta
       const v = def.value(p.stats);
       if (v >= def.min && (!best || v > best.v)) best = { p, v };
     }
-    if (best) out.push({ id: def.id, icon: def.icon, title: def.title, playerId: best.p.id, playerName: best.p.name, detail: def.detail(best.v) });
+    if (best) out.push({ id: def.id, icon: def.icon, playerId: best.p.id, playerName: best.p.name, value: best.v });
     if (out.length >= max) break;
   }
   return out;

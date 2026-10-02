@@ -1,13 +1,15 @@
 // Application shell: URL params, renderer, screens (menu / lobby / game / results) and the transport wiring.
 import * as THREE from 'three';
-import { PLAYER_COLORS } from '../shared/constants';
+import { PLAYER_COLORS, TOUCH } from '../shared/constants';
 import type { ClientMsg, ResultsMsg, RoomPhase, RoomPlayerInfo, ServerMsg } from '../shared/protocol';
 import { Sfx } from './audio';
-import { Game } from './game';
+import { Game, type GameDeps } from './game';
+import { errorText, getLang, initLang, netText, onLangChange, setLang, t, type Lang } from './i18n';
 import { Input } from './input';
 import { LocalTransport } from './net/localTransport';
 import type { Transport } from './net/transport';
 import { WsTransport } from './net/wsTransport';
+import { TouchControls, detectTouchDevice } from './touch';
 import { Hud } from './ui/hud';
 import { Lobby } from './ui/lobby';
 import { Menu, loadName } from './ui/menu';
@@ -27,6 +29,10 @@ export interface UrlParams {
   room?: string;
   create: boolean;
   name?: string;
+  /** force the on-screen touch controls (QA on a desktop browser) */
+  touch: boolean;
+  /** ?lang=zh|en (handled by i18n.initLang; kept here for completeness) */
+  lang?: Lang;
 }
 
 export function parseParams(search: string): UrlParams {
@@ -49,6 +55,8 @@ export function parseParams(search: string): UrlParams {
     room: q.get('room')?.toUpperCase() || undefined,
     create: q.has('create'),
     name: q.get('name') || undefined,
+    touch: q.has('touch'),
+    lang: q.get('lang') === 'zh' ? 'zh' : q.get('lang') === 'en' ? 'en' : undefined,
   };
 }
 
@@ -80,14 +88,21 @@ export class App {
   private wantAutostart = false;
   private lastResults: ResultsMsg | null = null;
   private disconnected = false;
+  private touchUI = false;
+  private touch: TouchControls | null = null;
+  private gameDeps: GameDeps | null = null;
+  private readonly rotateEl: HTMLElement;
 
   constructor(private readonly params: UrlParams) {
+    initLang(window.location.search);
+    this.touchUI = params.touch || detectTouchDevice();
+    document.body.classList.toggle('touch', this.touchUI);
     const ui = document.getElementById('ui')!;
     const canvas = document.getElementById('scene') as HTMLCanvasElement;
     let renderer: THREE.WebGLRenderer | null = null;
     try {
       renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this.touchUI ? TOUCH.PIXEL_RATIO_MAX : 1.5));
       renderer.shadowMap.enabled = !params.noshadow;
       renderer.shadowMap.type = THREE.PCFShadowMap;
       renderer.setClearColor(0x8fd3ff);
@@ -96,7 +111,16 @@ export class App {
     }
     this.renderer = renderer;
     this.sfx = new Sfx(!params.nosfx);
+    this.sfx.attachLifecycle(); // gesture unlocking (iOS), hidden-tab silence
     this.hud = new Hud(ui, params.debug);
+    this.hud.setMuteHandler(() => this.toggleMute());
+    // the order cards (top right) must stay above the touch buttons (bottom right)
+    this.hud.setBottomLimit(() => (this.touch?.rects().filter((r) => r.x0 > window.innerWidth / 2).reduce((m, r) => Math.min(m, r.y0), Infinity) ?? Infinity));
+    this.rotateEl = document.createElement('div');
+    this.rotateEl.className = 'rotate';
+    this.rotateEl.hidden = true;
+    ui.append(this.rotateEl);
+    this.renderRotate();
     this.notice = new Notice(ui, () => this.toMenu());
     this.menu = new Menu(
       ui,
@@ -104,23 +128,105 @@ export class App {
         onSolo: (name) => void this.startSolo(name, true),
         onCreate: (name) => void this.startOnline('create', name),
         onJoin: (name, code) => {
-          if (!/^[A-Z]{4}$/.test(code)) this.notice.toast('请输入4位房间码');
+          if (!/^[A-Z]{4}$/.test(code)) this.notice.toast(t('toast.codeInvalid'));
           else void this.startOnline('join', name, code);
         },
+        onToggleMute: () => this.toggleMute(),
       },
       params.name ?? loadName(),
       true,
     );
     this.lobby = new Lobby(ui, {
-      onStart: () => this.transport?.send({ type: 'startGame', ...this.startOverrides() }),
+      onStart: () => {
+        this.tryFullscreen();
+        this.transport?.send({ type: 'startGame', ...this.startOverrides() });
+      },
       onLeave: () => this.toMenu(),
-      onCopyInvite: (code) => void this.copyInvite(code),
+      onInvite: (code) => void this.invite(code),
     });
     this.results = new Results(ui);
     this.input.attach();
-    const unlock = () => this.sfx.unlock();
-    window.addEventListener('pointerdown', unlock);
-    window.addEventListener('keydown', unlock);
+    if (this.touchUI) this.enableTouchUI();
+    this.updateMuteUi();
+    // phones that were not detected as touch devices (touch-screen laptops): switch on the first real touch
+    window.addEventListener(
+      'pointerdown',
+      (e) => {
+        if (e.pointerType === 'touch' && !this.touchUI) this.enableTouchUI();
+      },
+      { capture: true, passive: true },
+    );
+    // M = mute
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== 'KeyM' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      this.toggleMute();
+    });
+    // iOS Safari: no pinch / double-tap zoom, whatever the viewport meta says
+    for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(ev, (e) => e.preventDefault());
+    document.addEventListener('contextmenu', (e) => {
+      if (this.touchUI) e.preventDefault();
+    });
+    window.addEventListener('resize', () => this.updateRotate());
+    window.addEventListener('orientationchange', () => this.updateRotate());
+    onLangChange(() => {
+      this.notice.applyLang();
+      this.touch?.applyLang();
+      this.renderRotate();
+      this.lobby.refresh();
+      if (this.results.visible) this.showResults();
+      this.updateMuteUi();
+    });
+  }
+
+  // ------------------------------------------------------------------ touch / mute / fullscreen helpers
+  private enableTouchUI(): void {
+    this.touchUI = true;
+    document.body.classList.add('touch');
+    if (!this.touch) {
+      this.touch = new TouchControls(document.getElementById('ui')!);
+      this.input.setTouchSource(this.touch);
+    }
+    if (this.gameDeps) this.gameDeps.touch = this.touch;
+    if (this.phase === 'playing' && this.game && !this.disconnected) this.touch.setVisible(true);
+    this.updateRotate();
+  }
+
+  private toggleMute(): void {
+    this.sfx.toggleMuted();
+    this.updateMuteUi();
+  }
+
+  private updateMuteUi(): void {
+    const m = this.sfx.isMuted();
+    this.hud.setMuted(m);
+    this.menu.setMuted(m);
+  }
+
+  /** Android: go fullscreen (and try to lock landscape) when a game is started from a tap. Failure is fine. */
+  private tryFullscreen(): void {
+    if (!this.touchUI) return;
+    try {
+      const el = document.documentElement;
+      if (!document.fullscreenElement && el.requestFullscreen) {
+        void el
+          .requestFullscreen({ navigationUI: 'hide' })
+          .then(() => (screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> }).lock?.('landscape').catch(() => {}))
+          .catch(() => {});
+      }
+    } catch {
+      /* iOS Safari has no fullscreen API for pages */
+    }
+  }
+
+  private renderRotate(): void {
+    this.rotateEl.innerHTML = `<div class="r-phone">📱</div><div class="r-title">${t('touch.rotate.title')}</div><div class="r-sub">${t('touch.rotate.sub')}</div>`;
+  }
+
+  /** portrait phone during a round: ask for landscape */
+  private updateRotate(): void {
+    const portrait = window.innerHeight > window.innerWidth;
+    this.rotateEl.hidden = !(this.touchUI && portrait && this.phase === 'playing');
   }
 
   /** Decide the first screen from the URL. */
@@ -150,53 +256,66 @@ export class App {
   private async startSolo(name: string, autostart: boolean): Promise<void> {
     if (!this.renderer) {
       this.menu.show();
-      alert('你的浏览器不支持 WebGL，无法运行游戏。');
+      alert(t('err.noWebgl'));
       return;
     }
+    this.tryFullscreen();
     this.teardown();
     this.solo = true;
     this.wantAutostart = autostart;
     this.menu.hide();
-    const t = new LocalTransport();
-    this.attach(t);
-    await t.connect(name);
+    const tr = new LocalTransport();
+    this.attach(tr);
+    await tr.connect(name);
   }
 
   private async startOnline(mode: 'create' | 'join', name: string, code = ''): Promise<void> {
     if (!this.renderer) {
       this.menu.show();
-      alert('你的浏览器不支持 WebGL，无法运行游戏。');
+      alert(t('err.noWebgl'));
       return;
     }
+    this.tryFullscreen();
     this.teardown();
     this.solo = false;
     this.wantAutostart = false;
     this.menu.hide();
-    const t = new WsTransport();
-    this.attach(t);
-    t.onClose((reason) => this.onDisconnected(reason));
+    const tr = new WsTransport();
+    this.attach(tr);
+    tr.onClose((reason) => this.onDisconnected(reason));
     try {
-      await t.connect(name);
+      await tr.connect(name);
     } catch (err) {
-      if (this.transport === t) {
+      if (this.transport === tr) {
         this.toMenu();
-        this.notice.toast(err instanceof Error ? err.message : '无法连接服务器');
+        this.notice.toast(netText(err instanceof Error ? err.message : 'unreachable'));
       }
       return;
     }
-    if (this.transport !== t) return; // the user left while we were connecting
-    t.send(mode === 'create' ? { type: 'createRoom' } : { type: 'joinRoom', code });
+    if (this.transport !== tr) return; // the user left while we were connecting
+    tr.send(mode === 'create' ? { type: 'createRoom' } : { type: 'joinRoom', code });
   }
 
   private onDisconnected(reason: string): void {
     this.disconnected = true;
     this.game?.freeze();
     this.input.enabled = false;
-    this.notice.showDisconnected(reason === '连接断开' ? '与服务器的连接已断开，这局无法继续了。' : reason);
+    this.touch?.setVisible(false);
+    this.notice.showDisconnected(reason === 'closed' ? t('disconnect.game') : netText(reason));
   }
 
-  private async copyInvite(code: string): Promise<void> {
+  /** Invite a friend: the system share sheet on phones, otherwise copy the link. */
+  private async invite(code: string): Promise<void> {
     const link = `${window.location.origin}/?room=${code}`;
+    if (this.canShare()) {
+      try {
+        await navigator.share({ title: t('share.title'), text: t('share.text', { code }), url: link });
+        return;
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return; // the player closed the sheet
+        // share failed for another reason: fall back to copying
+      }
+    }
     let ok = false;
     try {
       await navigator.clipboard.writeText(link);
@@ -216,12 +335,16 @@ export class App {
       }
       ta.remove();
     }
-    this.notice.toast(ok ? `已复制邀请链接：${link}` : `请手动复制：${link}`);
+    this.notice.toast(t(ok ? 'toast.copied' : 'toast.copyManual', { link }));
   }
 
-  private attach(t: Transport): void {
-    this.transport = t;
-    this.unsub = t.onMessage((m) => this.onMessage(m));
+  private canShare(): boolean {
+    return this.touchUI && typeof navigator.share === 'function';
+  }
+
+  private attach(tr: Transport): void {
+    this.transport = tr;
+    this.unsub = tr.onMessage((m) => this.onMessage(m));
   }
 
   /** drop the current game + connection (back to a clean slate) */
@@ -240,12 +363,15 @@ export class App {
     this.lobby.hide();
     this.notice.hideDisconnected();
     this.input.enabled = true;
+    this.touch?.setVisible(false);
+    this.sfx.setEngine(0, 0, false);
   }
 
   private toMenu(): void {
     this.teardown();
     this.phase = 'menu';
     this.menu.show();
+    this.updateRotate();
   }
 
   send(msg: ClientMsg): void {
@@ -276,12 +402,13 @@ export class App {
           // couldn't get into a room (wrong code, full, already playing ...): back to the menu with the reason
           this.toMenu();
         }
-        this.notice.toast(msg.msg);
+        this.notice.toast(errorText(msg.code));
         break;
       default:
         break;
     }
     this.game?.handleMessage(msg);
+    this.updateRotate();
   }
 
   private onRoom(room: RoomInfo): void {
@@ -300,7 +427,7 @@ export class App {
       return;
     }
     this.phase = 'lobby';
-    this.lobby.show({ code: room.code, solo: this.solo, hostId: room.hostId, myId: this.myId, players: room.players });
+    this.lobby.show({ code: room.code, solo: this.solo, hostId: room.hostId, myId: this.myId, players: room.players, canShare: this.canShare() });
   }
 
   private showResults(): void {
@@ -331,8 +458,22 @@ export class App {
     this.input.setOverride(null); // a new round starts with clean controls
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); // Space must not re-press a menu button
     this.phase = 'playing';
+    const lowPower = this.touchUI;
+    this.gameDeps = {
+      renderer: this.renderer,
+      transport: this.transport,
+      hud: this.hud,
+      sfx: this.sfx,
+      input: this.input,
+      debug: this.params.debug,
+      shadows: !this.params.noshadow && !lowPower, // phones: no shadows (unless ?shadows)
+      forceShadows: this.params.shadows,
+      touch: this.touch,
+      lowPower,
+    };
+    if (this.params.shadows) this.gameDeps.shadows = true;
     this.game = new Game(
-      { renderer: this.renderer, transport: this.transport, hud: this.hud, sfx: this.sfx, input: this.input, debug: this.params.debug, shadows: !this.params.noshadow, forceShadows: this.params.shadows },
+      this.gameDeps,
       { seed: msg.seed, duration: msg.duration, startTime: msg.serverTime, players: this.room?.players ?? [], myId: this.myId },
     );
     this.game.start();
@@ -347,6 +488,9 @@ export class App {
       myId: this.myId || undefined,
       results: this.lastResults ?? undefined,
       disconnected: this.disconnected || undefined,
+      lang: getLang(),
+      touch: this.touchUI,
+      muted: this.sfx.isMuted(),
     };
     if (!g) {
       return {
@@ -371,6 +515,11 @@ export class App {
     giveOrder: (orderId?: string) => this.game?.debug.giveOrder(orderId),
     location: (id: string): [number, number] | null => this.game?.debug.location(id) ?? null,
     honk: () => this.game?.debug.honk(),
+    /** QA: audio graph state (context state, mute, engine gain, output RMS) */
+    audio: () => this.sfx.info(),
+    hudRects: () => this.game?.debug.hudRects() ?? { hud: [], touch: [] },
+    counters: () => this.game?.counters ?? { honks: 0, resets: 0 },
+    setLang: (l: Lang) => setLang(l, false),
     map: () => this.game?.debug.map() ?? null,
     targetFor: (orderId?: string) => this.game?.debug.targetFor(orderId) ?? null,
     /** feed a server message to the client as if it arrived from the transport (simulate teammates, events, ...) */

@@ -17,7 +17,6 @@ export const GAME = {
 } as const;
 
 export const PLAYER_COLORS = [0xe63946, 0x2a7de1, 0xffc93c, 0x2fbf71] as const; // red / blue / yellow / green
-export const PLAYER_COLOR_NAMES = ['红', '蓝', '黄', '绿'] as const;
 
 export const ZONE = {
   RADIUS: 5, // pickup / delivery circle radius (m)
@@ -213,4 +212,49 @@ export const VIEW = {
 export const CARGO_VIEW = {
   SCALE: 1.4, // size of the cargo on the rack
   WOBBLE_GAIN: 1.6, // exaggeration of the tower offset / tilt, soup surface tilt and scoop sway
+} as const;
+
+// ---------- Audio (DESIGN §13.2) ----------
+// Pre-limiter peak amplitudes (0..1) of every sound. The horn is the loudest "voice"; the engine tops out at ~30% of it.
+export const AUDIO = {
+  MASTER_GAIN: 0.8,
+  COMPRESSOR: { THRESHOLD: -14, KNEE: 6, RATIO: 8, ATTACK: 0.003, RELEASE: 0.15 }, // dB, dB, :1, s, s
+  SOFTCLIP: { LINEAR_UNTIL: 0.8, CEILING: 0.97 }, // safety net after the compressor: the output can never reach 1.0
+  ENGINE: {
+    MAX_VS_HORN: 0.24, // full-throttle engine gain as a fraction of HORN_PEAK: ~30% of the horn's RMS loudness (the putts have a high crest factor)
+    IDLE_VS_MAX: 0.18, // idling level as a fraction of the maximum
+    IDLE_FADE_AFTER: 1.5, // s standing still without throttle before the engine fades to (almost) silence
+    IDLE_FADE_TC: 0.45, // s, time constant of that fade
+    FIRE_HZ_IDLE: 7, // putt-putt rate (pulses per second) at idle
+    FIRE_HZ_MAX: 23, // ... at full speed
+    PITCH_IDLE: 84, // Hz of the body tone (phone speakers cannot reproduce much below ~100 Hz: the sub sine and the saw carry the rest)
+    PITCH_MAX: 150,
+    CUTOFF_IDLE: 420, // Hz, low-pass cutoff
+    CUTOFF_MAX: 1250,
+    PULSE_DECAY: 5.5, // sharpness of one putt (larger = shorter)
+    WATCHDOG_MS: 400, // no setEngine() call for this long (frozen rAF, hidden window) -> fade the engine out
+  },
+  HORN_PEAK: 0.3,
+  DOG_PEAK: 0.4,
+  CRASH_PEAK: 0.6,
+  SPLASH_BIG_PEAK: 0.55,
+  DRIP_PEAK: 0.16,
+  THUD_PEAK: 0.3,
+  CHIME_PEAK: 0.17,
+  PICKUP_PEAK: 0.22,
+  POP_PEAK: 0.22,
+  FAIL_PEAK: 0.18,
+  SPLASH_MIN_GAP_MS: 600, // never more than one splash per this long (the old 250 ms spam)
+  DRIP_MIN_GAP_MS: 350,
+  SPLASH_BIG_AMOUNT: 0.12, // soup spilled since the last sound (fraction of a bowl) that earns a real splash instead of a drip
+} as const;
+
+// ---------- Touch controls (DESIGN §13.3) ----------
+export const TOUCH = {
+  STEER_RADIUS: 60, // px of horizontal drag for full steering lock
+  STEER_ZONE_W: 0.46, // steering zone: left this fraction of the screen width ...
+  STEER_ZONE_H: 0.6, // ... and the bottom this fraction of its height
+  PIXEL_RATIO_MAX: 1.5,
+  PARTICLE_SCALE: 0.5, // fewer particles on phones
+  COMPACT_HEIGHT: 500, // px: below this the HUD switches to its compact layout
 } as const;

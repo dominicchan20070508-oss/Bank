@@ -46,7 +46,8 @@ export interface Door {
 
 export interface Restaurant {
   id: string; // 'r0'..'r2'
-  name: string;
+  name: string; // Simplified Chinese
+  nameEn: string; // English
   food: FoodKind;
   color: number;
   buildingId: number;
@@ -56,6 +57,7 @@ export interface Restaurant {
 export interface Customer {
   id: string; // 'c0'..'c7'
   name: string; // "3号楼 张先生"
+  nameEn: string; // "Bldg 3 · Mr. Zhang"
   houseNo: number;
   buildingId: number;
   front: Door;
@@ -116,15 +118,26 @@ export interface CityMap {
   spawns: Spawn[];
 }
 
-export const RESTAURANT_DEFS: readonly { name: string; food: FoodKind; color: number }[] = [
-  { name: '王记汤馆', food: 'soup', color: 0xe63946 },
-  { name: '披萨大叔', food: 'pizza', color: 0xff8c1a },
-  { name: '冰冰甜品', food: 'ice', color: 0xff7eb6 },
+export const RESTAURANT_DEFS: readonly { name: string; nameEn: string; food: FoodKind; color: number }[] = [
+  { name: '王记汤馆', nameEn: "Wang's Soup House", food: 'soup', color: 0xe63946 },
+  { name: '披萨大叔', nameEn: 'Uncle Pizza', food: 'pizza', color: 0xff8c1a },
+  { name: '冰冰甜品', nameEn: 'Chill Desserts', food: 'ice', color: 0xff7eb6 },
 ];
 
-const CUSTOMER_NAMES = [
-  '张先生', '李女士', '王大爷', '赵奶奶', '刘小姐', '陈同学',
-  '周老板', '吴阿姨', '郑叔叔', '孙大姐', '钱博士', '冯师傅',
+/** Customer names in both languages (the shuffle below permutes the pairs together, so the RNG stream is unchanged). */
+const CUSTOMER_NAMES: readonly { zh: string; en: string }[] = [
+  { zh: '张先生', en: 'Mr. Zhang' },
+  { zh: '李女士', en: 'Ms. Li' },
+  { zh: '王大爷', en: 'Grandpa Wang' },
+  { zh: '赵奶奶', en: 'Grandma Zhao' },
+  { zh: '刘小姐', en: 'Miss Liu' },
+  { zh: '陈同学', en: 'Student Chen' },
+  { zh: '周老板', en: 'Boss Zhou' },
+  { zh: '吴阿姨', en: 'Auntie Wu' },
+  { zh: '郑叔叔', en: 'Uncle Zheng' },
+  { zh: '孙大姐', en: 'Sister Sun' },
+  { zh: '钱博士', en: 'Dr. Qian' },
+  { zh: '冯师傅', en: 'Master Feng' },
 ];
 
 const BUILDING_COLORS = [
@@ -345,7 +358,7 @@ export function generateCity(seed: number): CityMap {
     b.roleId = `r${idx}`;
     b.color = def.color;
     b.h = Math.min(b.h, 14);
-    restaurants.push({ id: `r${idx}`, name: def.name, food: def.food, color: def.color, buildingId: b.id, door: doorFor(block, b, face) });
+    restaurants.push({ id: `r${idx}`, name: def.name, nameEn: def.nameEn, food: def.food, color: def.color, buildingId: b.id, door: doorFor(block, b, face) });
   });
 
   // --- customers: 8 spread-out buildings, each with a front and a back door ---
@@ -390,7 +403,8 @@ export function generateCity(seed: number): CityMap {
     p.b.roleId = `c${idx}`;
     customers.push({
       id: `c${idx}`,
-      name: `${houseNos[idx]}号楼 ${names[idx]}`,
+      name: `${houseNos[idx]}号楼 ${names[idx]!.zh}`,
+      nameEn: `Bldg ${houseNos[idx]} · ${names[idx]!.en}`,
       houseNo: houseNos[idx]!,
       buildingId: p.b.id,
       front: p.front,

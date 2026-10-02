@@ -50,23 +50,31 @@ describe('tip formula (DESIGN §7)', () => {
     expect(computeTip({ ...base, distance: 0, integrity: 0.05, elapsed: 100, request: 'noHorn', requestOk: false }).tip).toBe(0);
   });
 
-  it('summary line lists integrity, timing and the request result', () => {
+  it('tip breakdown is structured data (codes + numbers), not text', () => {
     const r = computeTip({ ...base, integrity: 0.72, elapsed: 22, request: 'noHorn', requestOk: false });
-    expect(r.summary).toContain('完整度 72%');
-    expect(r.summary).toContain('提前 18s');
-    expect(r.summary).toContain('狗被吵醒 −8');
-    expect(r.summary.startsWith(`+¥${r.tip}`)).toBe(true);
+    expect(r.parts).toEqual([
+      { key: 'tip.integrity', pct: 72 },
+      { key: 'tip.early', secs: 18 },
+      { key: 'tip.noHorn.fail', bonus: -8 },
+    ]);
+    expect(JSON.stringify(r)).not.toMatch(/[\u4e00-\u9fff]/);
+    const late = computeTip({ ...base, integrity: 1, elapsed: 50, request: 'rush', requestOk: true });
+    expect(late.parts).toEqual([
+      { key: 'tip.integrity', pct: 100 },
+      { key: 'tip.late', secs: 10 },
+      { key: 'tip.rush.ok', bonus: 15 },
+    ]);
   });
 
-  it('customer quotes follow the integrity bands', () => {
-    expect(integrityQuote('soup', 1)).toBe('五星好评！');
-    expect(integrityQuote('soup', 0.9)).toBe('五星好评！');
-    expect(integrityQuote('pizza', 0.75)).toBe('还行吧…');
-    expect(integrityQuote('soup', 0.5)).toBe('汤怎么只剩一半？');
-    expect(integrityQuote('pizza', 0.4)).toContain('披萨');
-    expect(integrityQuote('ice', 0.4)).toContain('冰淇淋');
-    expect(integrityQuote('soup', 0.1)).toBe('这是什么鬼？？');
-    expect(integrityQuote('soup', 0)).toBe('我的外卖呢？？');
+  it('customer quotes follow the integrity bands (as i18n keys)', () => {
+    expect(integrityQuote('soup', 1)).toBe('quote.five');
+    expect(integrityQuote('soup', 0.9)).toBe('quote.five');
+    expect(integrityQuote('pizza', 0.75)).toBe('quote.ok');
+    expect(integrityQuote('soup', 0.5)).toBe('quote.mid.soup');
+    expect(integrityQuote('pizza', 0.4)).toBe('quote.mid.pizza');
+    expect(integrityQuote('ice', 0.4)).toBe('quote.mid.ice');
+    expect(integrityQuote('soup', 0.1)).toBe('quote.bad');
+    expect(integrityQuote('soup', 0)).toBe('quote.none');
   });
 });
 

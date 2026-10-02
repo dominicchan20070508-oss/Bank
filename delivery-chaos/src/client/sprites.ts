@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import type { Customer, FoodKind, Restaurant } from '../shared/map';
 import { UI_FONT, drawFoodIcon, roundRect } from './icons';
+import { placeName } from './i18n';
 
 export interface LabelSprite {
   sprite: THREE.Sprite;
@@ -64,6 +65,13 @@ export function makeNameTag(name: string, color: number, food: FoodKind | null =
   return toSprite(c, 0.8);
 }
 
+/** set ctx.font so that `text` fits in maxW pixels (shrinking from `size`, never below 55%) */
+function fitFont(ctx: CanvasRenderingContext2D, text: string, maxW: number, size: number, weight: string): void {
+  ctx.font = `${weight} ${size}px ${UI_FONT}`;
+  const w = ctx.measureText(text).width;
+  if (w > maxW) ctx.font = `${weight} ${Math.max(size * 0.55, (size * maxW) / w)}px ${UI_FONT}`;
+}
+
 export function makeRestaurantSign(r: Restaurant): LabelSprite {
   const c = document.createElement('canvas');
   c.width = 512;
@@ -93,8 +101,10 @@ export function makeRestaurantSign(r: Restaurant): LabelSprite {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.lineJoin = 'round';
-  ctx.strokeText(r.name, 316, 92, 300);
-  ctx.fillText(r.name, 316, 92, 300);
+  const label = placeName(r);
+  fitFont(ctx, label, 300, 62, '900'); // long English names get a smaller font instead of being squashed
+  ctx.strokeText(label, 316, 92, 300);
+  ctx.fillText(label, 316, 92, 300);
   return toSprite(c, 5.2);
 }
 
@@ -112,8 +122,9 @@ export function makeCustomerSign(cu: Customer): LabelSprite {
   ctx.fillStyle = '#2b2a33';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.font = `bold 44px ${UI_FONT}`;
-  ctx.fillText(cu.name, 192, 58, 350);
+  const label = placeName(cu);
+  fitFont(ctx, label, 350, 44, 'bold');
+  ctx.fillText(label, 192, 58, 350);
   return toSprite(c, 1.7);
 }
 

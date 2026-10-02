@@ -9,6 +9,27 @@
 
 ---
 
+## English Quick Start
+
+**Delivery Chaos** is a chaotic co-op motorbike food-delivery game for 1-4 players (browser, desktop or phone). Ride to a glowing restaurant, stop to pick up the order, then stop at the customer's door. Soup sloshes, pizza towers topple and ice cream melts, so ride smooth for bigger tips. The whole team shares one tip pool and one star rating; a round lasts 4 minutes.
+
+```
+git clone https://github.com/dominicchan20070508-oss/Bank.git
+cd Bank/delivery-chaos
+npm install
+npm run build
+npm start            # then open http://localhost:8080  (Node.js 22 LTS)
+```
+
+- **Language**: the UI follows your browser language (Chinese for `zh*`, English otherwise). Use the **中文 / EN** switch on the main menu; the choice is remembered. `?lang=en` or `?lang=zh` in the URL overrides it. Players in the same room can use different languages.
+- **Play with friends**: *Create room* gives a 4-letter code (or use *Copy invite link* / *Share invite* on a phone). Friends on the same Wi-Fi open the `http://<your-LAN-address>:8080` URL that `npm start` prints; for friends elsewhere use a tunnel such as `npx cloudflared tunnel --url http://localhost:8080` or a hosted copy (details in the Chinese section 一.6 below).
+- **Phones and tablets**: open the game URL in landscape. A steering pad appears on the left (touch and drag horizontally anywhere in the lower-left area) and GAS / BRAKE / DRIFT / HORN / RESET buttons on the right; multi-touch works, so steer with one thumb and hold GAS with the other. In portrait, the game asks you to rotate the phone. Add `?touch` to the URL to force the touch controls on a desktop browser.
+- **Keyboard**: `W`/`Up` gas, `S`/`Down` brake and reverse, `A` `D`/arrows steer, `Space` handbrake (drift), `H` horn, `R` stand the bike back up (3 s cooldown), `M` mute.
+- **Sound**: all sounds are synthesized (no audio files). The speaker button (top right in the game, top right in the menu) or `M` mutes; the choice is remembered. On iPhone, sound starts after your first tap.
+- **Developers**: `npm test`, `npm run typecheck`, `npm run dev` (Vite on 5173 + game server on 8080). QA scripts live in `qa/` (details in the Chinese section 四 below).
+
+---
+
 ## 一、怎么玩（给玩家，Windows）
 
 ### 1. 安装 Node.js（只需要做一次）
@@ -63,7 +84,7 @@ npm start
    ```
 
 2. 第一次启动时 Windows 防火墙会弹窗问“是否允许 Node.js 访问网络”：**勾选“专用网络”，点“允许访问”**。（如果没弹窗或者点错了，朋友打不开，就到“Windows 安全中心 → 防火墙和网络保护 → 允许应用通过防火墙”里给 Node.js 勾上“专用”。）
-3. 朋友在自己的电脑浏览器里（需要键盘，手机暂不支持）打开上面那个地址（**不要用 localhost**），输入房间码，或者直接打开你发的邀请链接。
+3. 朋友在自己的电脑或手机浏览器里打开上面那个地址（**不要用 localhost**），输入房间码，或者直接打开你发的邀请链接。手机请**横屏**游玩（竖屏会提示把手机横过来）。
 
 ### 6. 和异地的朋友通过互联网一起玩
 
@@ -106,6 +127,11 @@ npx cloudflared tunnel --url http://localhost:8080
 | `空格` | 手刹（甩尾；甩得太狠时松手会“高边翻车”） |
 | `H` | 喇叭 |
 | `R` | 扶正（冷却 3 秒） |
+| `M` | 静音 / 开启声音（也可以点右上角的喇叭图标，会被记住） |
+
+**手机 / 平板（触屏）**：横屏进入游戏后，左半边屏幕任意位置按下并左右拖动 = 模拟转向（出现底座和摇杆头，拖得越远转得越急）；右边有大号 **油门** 和 **刹车/倒车** 按钮，以及 **手刹**、**喇叭**、**扶正** 三个小按钮。支持多点触控（一只手转向、另一只手踩油门）。电脑上想试触屏界面：网址后加 `?touch`。
+
+**语言**：菜单右上角有 **中文 / EN** 切换，选择会被记住；网址加 `?lang=en` 或 `?lang=zh` 可强制指定。同一个房间里每个人可以用不同的语言。
 
 ## 三、规则简介
 
@@ -130,9 +156,11 @@ npm run build && npm start   # 单端口(PORT，默认 8080)同时托管网页�
 ```
 src/shared/   纯 TS，前后端共用：constants(所有可调参数) rng map orders scoring protocol validate rules(GameRoom)
 src/sim/      纯逻辑：balance(倾斜/平衡模型) cargo(三种货物模型)
-src/client/   three.js + cannon-es 客户端：game(主循环) world bike cargoView debris camera audio minimap …
+src/client/   three.js + cannon-es 客户端：game(主循环) world bike cargoView debris camera minimap …
+              i18n(中英文字典 + t() + 语言检测) audio/audioLogic(WebAudio 合成 + 限幅总线 + 小摩托“突突”引擎)
+              input/inputMerge/touch(键盘 + 触屏合并输入；触屏摇杆和按钮)
   net/        transport.ts 接口；localTransport(单机，浏览器里跑 GameRoom)；wsTransport(联机，含时钟同步)
-  ui/         HUD / 菜单 / 大厅 / 结算（简体中文）
+  ui/         HUD / 菜单 / 大厅 / 结算（全部走 i18n；高度 ≤ 500px 时自动切换紧凑布局）
 server/       Node + ws：static.ts(托管 dist) rooms.ts(房间表/会话) app.ts(HTTP+WS) index.ts(入口，打印局域网地址)
 tests/        vitest
 qa/           Playwright 验收脚本（需要先 npm run build && npm start）
@@ -141,6 +169,10 @@ qa/           Playwright 验收脚本（需要先 npm run build && npm start）
 - **所有数值调参都在 `src/shared/constants.ts`**（摩托手感、倾斜模型、货物参数、小费、星级、地图数量、相机、视觉夸张系数……）。
 - 单机和联机走同一条代码路径：单机 = 浏览器里的 `LocalTransport` 跑同一个 `GameRoom`。
 - 服务器权威：订单池、谁拿了哪单、计时、小费、统计、结算；客户端权威：自己摩托的位置/姿态/货物完整度。
-- 测试钩子：URL 参数 `?solo &seed=1 &autostart &debug &nosfx &duration=60 &noshadow &shadows`，联机 `?create&name=小明`、`?room=ABCD&name=小红`；页面里的 `window.__game.getState()` / `window.__game.debug.*`（`setInput` `teleport` `forceCrash` `giveOrder` `location` `map` `targetFor` …）。
+- **文案走 i18n**：玩家可见的文字都在 `src/client/i18n.ts` 里（`zh` / `en` 两套字典，缺键会在 typecheck 时报错）。服务器和 `shared/` 只发结构化代码和数字（小费明细 `parts`、顾客台词 `quote` 键、奖项 `id`+`value`、错误 `code`），由各个客户端按自己的语言格式化；地图里的餐厅/顾客名同时带中英文（`name` / `nameEn`）。
+- 测试钩子：URL 参数 `?solo &seed=1 &autostart &debug &nosfx &duration=60 &noshadow &shadows &lang=en|zh &touch`，联机 `?create&name=小明`、`?room=ABCD&name=小红`；页面里的 `window.__game.getState()` / `window.__game.debug.*`（`setInput` `teleport` `forceCrash` `giveOrder` `location` `map` `targetFor` …）。
 - 联机调试开关：`DC_DEBUG=1 npm start`（Windows PowerShell：`$env:DC_DEBUG=1; npm start`）才会允许 `debugGive` 和房主自定义 `?duration=` / `?seed=`；正式玩**不要**开。
-- 验收脚本：`node qa/pm-solo.mjs http://localhost:8080 qa`、`node qa/pm-multi.mjs http://localhost:8080 qa`（服务器要用 `DC_DEBUG=1` 启动）。
+- 验收脚本（服务器要用 `DC_DEBUG=1` 启动）：`node qa/pm-solo.mjs http://localhost:8080 qa`、`node qa/pm-multi.mjs http://localhost:8080 qa`。
+- v0.2 验收：`node qa/v02.cjs`（截图到 `qa/v02/`：中英文 × 电脑/手机横屏 × 菜单/大厅/游戏/结算；真实多点触控；声音：最坏混音峰值、各音效峰值/RMS、切后台静音、静音开关；中英文客户端同房间联机）。`ONLY=shots,touch,audio,multi` 可只跑一部分。
+- 试听样本：`node qa/audio-export.cjs` 把每个音效离线渲染成 `qa/audio/*.wav`（引擎怠速/半油门/满油门、喇叭、狗叫、洒汤小/大、翻车、撞击、取餐、交货、失败、最坏混音）。
+- 额外的 `window.__game` 钩子（v0.2）：`getState().input / counters / lang / touch / muted`，`debug.audio()`（AudioContext 状态、静音、引擎增益、输出电平）、`debug.counters()`、`debug.hudRects()`、`debug.setLang('en')`，以及 `window.__game.Sfx`（真正的音效类，可注入 `OfflineAudioContext` 渲染）。

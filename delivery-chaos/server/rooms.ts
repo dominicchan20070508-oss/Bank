@@ -2,7 +2,7 @@
 // ServerMsg and be closed, so this is easy to test and the ws wiring stays in app.ts. All game rules live in GameRoom.
 import { GameRoom } from '../src/shared/rules';
 import { GAME } from '../src/shared/constants';
-import type { ServerMsg } from '../src/shared/protocol';
+import type { ErrorCode, ServerMsg } from '../src/shared/protocol';
 import { TokenBucket, parseClientMsg } from '../src/shared/validate';
 
 export interface Conn {
@@ -39,15 +39,16 @@ interface RoomEntry {
 // no I and O: they look like 1 and 0
 const CODE_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 
+/** Error codes sent to clients; each client shows its own language's text for them. */
 export const ERR = {
-  notFound: '房间不存在，请检查房间码',
-  playing: '房间正在游戏中，请等下一局',
-  full: '房间已满（最多4人）',
-  inRoom: '你已经在房间里了',
-  noRoom: '你还没有加入房间',
-  busy: '服务器房间太多了，请稍后再试',
-  debugOff: '服务器未开启调试功能',
-} as const;
+  notFound: 'notFound',
+  playing: 'playing',
+  full: 'full',
+  inRoom: 'inRoom',
+  noRoom: 'noRoom',
+  busy: 'busy',
+  debugOff: 'debugOff',
+} as const satisfies Record<ErrorCode, ErrorCode>;
 
 export class RoomManager {
   private readonly rooms = new Map<string, RoomEntry>();
@@ -104,8 +105,8 @@ export class RoomManager {
     }
   }
 
-  private error(s: Session, msg: string): void {
-    this.send(s, { type: 'error', msg });
+  private error(s: Session, code: ErrorCode): void {
+    this.send(s, { type: 'error', code });
   }
 
   private receive(s: Session, raw: string): void {

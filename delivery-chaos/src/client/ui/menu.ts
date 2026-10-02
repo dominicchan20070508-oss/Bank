@@ -1,20 +1,21 @@
-// Main menu (name + 单人练习 / 创建房间 / 加入房间).
+// Main menu (name + solo / create room / join room), language switch and mute button.
+import { getLang, onLangChange, setLang, t, type Lang } from '../i18n';
+import { el, esc } from './dom';
+
 export interface MenuCallbacks {
   onSolo(name: string): void;
   onCreate(name: string): void;
   onJoin(name: string, code: string): void;
+  onToggleMute(): void;
 }
 
-import { el } from './dom';
-
+/** The player's saved name ('' = none: every client then shows its own language's "Rider N"). */
 export function loadName(): string {
   try {
-    const n = localStorage.getItem('dc.name');
-    if (n) return n;
+    return localStorage.getItem('dc.name') ?? '';
   } catch {
-    /* storage may be blocked */
+    return '';
   }
-  return `骑手${Math.floor(10 + Math.random() * 90)}`;
 }
 function saveName(n: string): void {
   try {
@@ -24,13 +25,14 @@ function saveName(n: string): void {
   }
 }
 
-// ------------------------------------------------------------------ main menu
 export class Menu {
   readonly root = el('div', 'screen');
-  private readonly nameInput: HTMLInputElement;
-  private readonly soon: HTMLElement;
-  private readonly codeInput: HTMLInputElement;
-  private readonly joinRow: HTMLElement;
+  private nameValue: string;
+  private codeValue = '';
+  private joinOpen = false;
+  private soonShown = false;
+  private muted = false;
+  private cb: MenuCallbacks;
 
   constructor(
     parent: HTMLElement,
@@ -38,64 +40,107 @@ export class Menu {
     initialName: string,
     private readonly onlineAvailable: boolean,
   ) {
+    this.cb = cb;
+    this.nameValue = initialName;
+    parent.append(this.root);
+    this.render();
+    onLangChange(() => this.render());
+  }
+
+  private name(): string {
+    const input = this.root.querySelector<HTMLInputElement>('#dc-name');
+    if (input) this.nameValue = input.value.trim().slice(0, 12);
+    saveName(this.nameValue);
+    return this.nameValue;
+  }
+
+  /** (Re)build the menu in the current language, keeping what was typed. */
+  render(): void {
+    const cur = this.root.querySelector<HTMLInputElement>('#dc-name');
+    if (cur) this.nameValue = cur.value;
+    const code = this.root.querySelector<HTMLInputElement>('#dc-code');
+    if (code) this.codeValue = code.value;
+    const hidden = this.root.hidden;
+    const lang = getLang();
     this.root.innerHTML = `
-      <div class="card panel">
-        <h1 class="title">外卖大乱送</h1>
-        <div class="subtitle">DELIVERY CHAOS</div>
-        <div class="field"><label for="dc-name">你的名字</label><input id="dc-name" maxlength="12" autocomplete="off" /></div>
-        <button class="btn" data-k="solo">单人练习</button>
-        <div class="row">
-          <button class="btn secondary" data-k="create">创建房间</button>
-          <button class="btn secondary" data-k="join">加入房间</button>
+      <div class="menu-tools">
+        <div class="langsw" role="group" aria-label="${esc(t('lang.switch'))}">
+          <button data-lang="zh" class="${lang === 'zh' ? 'on' : ''}">${t('lang.zh')}</button><button data-lang="en" class="${lang === 'en' ? 'on' : ''}">${t('lang.en')}</button>
         </div>
-        <div class="field" data-k="joinrow" hidden><label for="dc-code">房间码</label><input id="dc-code" maxlength="4" autocomplete="off" placeholder="ABCD" style="text-transform:uppercase;width:110px;text-align:center;letter-spacing:4px" /><button class="btn small" data-k="go" style="width:auto;margin:0">加入</button></div>
-        <div class="soon" data-k="soon">联机功能即将上线</div>
+        <button class="icon-btn" data-k="mute" aria-label="${esc(t(this.muted ? 'sound.unmute' : 'sound.mute'))}">${this.muted ? '🔇' : '🔊'}</button>
+      </div>
+      <div class="card panel">
+        <h1 class="title">${t('menu.title')}</h1>
+        <div class="subtitle">${t('menu.subtitle')}</div>
+        <div class="field"><label for="dc-name">${t('menu.name')}</label><input id="dc-name" maxlength="12" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="${esc(t('menu.namePlaceholder'))}" /></div>
+        <button class="btn" data-k="solo">${t('menu.solo')}</button>
+        <div class="row">
+          <button class="btn secondary" data-k="create">${t('menu.create')}</button>
+          <button class="btn secondary" data-k="join">${t('menu.join')}</button>
+        </div>
+        <div class="field" data-k="joinrow" ${this.joinOpen ? '' : 'hidden'}><label for="dc-code">${t('menu.code')}</label><input id="dc-code" class="code-input" maxlength="4" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" placeholder="ABCD" /><button class="btn small" data-k="go">${t('menu.go')}</button></div>
+        <div class="soon" data-k="soon" style="display:${this.soonShown ? 'block' : 'none'}">${t('menu.soon')}</div>
         <div class="help">
-          <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / 方向键 骑行 · <kbd>空格</kbd> 手刹甩尾 · <kbd>H</kbd> 喇叭 · <kbd>R</kbd> 扶正<br />
-          去亮起的餐厅停下取餐，再送到顾客家门口停下交货。<br />货物会晃、会洒、会飞——开稳点，小费才多！
+          <span class="help-kbd"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / ${t('menu.arrows')} ${t('menu.ride')} · <kbd>${t('menu.key.space')}</kbd> ${t('menu.handbrake')} · <kbd>H</kbd> ${t('menu.horn')} · <kbd>R</kbd> ${t('menu.reset')}<br /></span>
+          <span class="help-touch">${t('menu.help.touch')}<br /></span>
+          ${t('menu.help.goal')}<br />${t('menu.help.tip')}
         </div>
       </div>`;
-    parent.append(this.root);
+    this.root.hidden = hidden;
     const q = <T extends HTMLElement>(k: string) => this.root.querySelector<T>(`[data-k="${k}"]`)!;
-    this.nameInput = this.root.querySelector('#dc-name')!;
-    this.nameInput.value = initialName;
-    this.codeInput = this.root.querySelector('#dc-code')!;
-    this.soon = q('soon');
-    this.joinRow = q('joinrow');
-    const name = () => {
-      const n = this.nameInput.value.trim().slice(0, 12) || initialName;
-      saveName(n);
-      return n;
-    };
-    q('solo').addEventListener('click', () => cb.onSolo(name()));
+    const nameInput = this.root.querySelector<HTMLInputElement>('#dc-name')!;
+    const codeInput = this.root.querySelector<HTMLInputElement>('#dc-code')!;
+    nameInput.value = this.nameValue;
+    codeInput.value = this.codeValue;
+    const joinRow = q('joinrow');
+
+    this.root.querySelectorAll<HTMLElement>('[data-lang]').forEach((b) =>
+      b.addEventListener('click', () => {
+        setLang(b.dataset.lang as Lang); // re-renders through onLangChange
+      }),
+    );
+    q('mute').addEventListener('click', () => this.cb.onToggleMute());
+    q('solo').addEventListener('click', () => this.cb.onSolo(this.name()));
     q('create').addEventListener('click', () => {
-      if (this.onlineAvailable) cb.onCreate(name());
+      if (this.onlineAvailable) this.cb.onCreate(this.name());
       else this.showSoon();
     });
     q('join').addEventListener('click', () => {
       if (!this.onlineAvailable) return this.showSoon();
-      this.joinRow.hidden = false;
-      this.codeInput.focus();
+      this.joinOpen = true;
+      joinRow.hidden = false;
+      codeInput.focus();
     });
-    this.codeInput.addEventListener('input', () => {
-      this.codeInput.value = this.codeInput.value.toUpperCase().replace(/[^A-Z]/g, '');
+    codeInput.addEventListener('input', () => {
+      codeInput.value = codeInput.value.toUpperCase().replace(/[^A-Z]/g, '');
     });
-    q('go').addEventListener('click', () => cb.onJoin(name(), this.codeInput.value.trim().toUpperCase()));
-    this.nameInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') cb.onSolo(name());
+    q('go').addEventListener('click', () => this.cb.onJoin(this.name(), codeInput.value.trim().toUpperCase()));
+    nameInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.cb.onSolo(this.name());
     });
-    this.codeInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') cb.onJoin(name(), this.codeInput.value.trim().toUpperCase());
+    codeInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.cb.onJoin(this.name(), codeInput.value.trim().toUpperCase());
     });
   }
 
   showSoon(): void {
-    this.soon.style.display = 'block';
-    this.soon.animate([{ transform: 'scale(1.25)' }, { transform: 'scale(1)' }], { duration: 250 });
+    this.soonShown = true;
+    const soon = this.root.querySelector<HTMLElement>('[data-k="soon"]')!;
+    soon.style.display = 'block';
+    soon.animate([{ transform: 'scale(1.25)' }, { transform: 'scale(1)' }], { duration: 250 });
+  }
+
+  setMuted(m: boolean): void {
+    this.muted = m;
+    const b = this.root.querySelector<HTMLElement>('[data-k="mute"]');
+    if (b) {
+      b.textContent = m ? '🔇' : '🔊';
+      b.setAttribute('aria-label', t(m ? 'sound.unmute' : 'sound.mute'));
+    }
   }
 
   getName(): string {
-    return this.nameInput.value.trim().slice(0, 12);
+    return this.name();
   }
   show(): void {
     this.root.hidden = false;

@@ -1,5 +1,6 @@
 // A teammate's bike: interpolated 100 ms in the past, cargo drawn from the network summary (so you can watch their
 // pizza tower wobble). Phase A has no remote players, but the wiring (snap -> RemoteBike) is already live in Game.
+import { playerName } from './i18n';
 import * as THREE from 'three';
 import { PLAYER_COLORS } from '../shared/constants';
 import type { PlayerStateMsg, RoomPlayerInfo } from '../shared/protocol';
@@ -22,7 +23,7 @@ export class RemoteBike {
     scene: THREE.Scene,
     readonly info: RoomPlayerInfo,
   ) {
-    this.model = new BikeModel(PLAYER_COLORS[info.color] ?? PLAYER_COLORS[0]!, info.name);
+    this.model = new BikeModel(PLAYER_COLORS[info.color] ?? PLAYER_COLORS[0]!, playerName(info));
     this.model.cargoMount.add(this.cargo.group);
     this.model.setVisible(false);
     scene.add(this.model.root);
@@ -37,7 +38,7 @@ export class RemoteBike {
     if (kind !== this.cargo.currentKind) {
       if (kind) this.cargo.setKind(kind, kind === 'soup' ? 1 : Math.max(1, Math.round(cargoSize), Math.round(sample.cargo!.a)));
       else this.cargo.clear();
-      this.model.setName(this.info.name, kind); // the tag shows what they are carrying
+      this.model.setName(playerName(this.info), kind); // the tag shows what they are carrying
     }
   }
 

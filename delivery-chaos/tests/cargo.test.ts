@@ -17,7 +17,7 @@ describe('soup', () => {
     const ev = run(c, 30, A(), 0, 0);
     expect(ev).toHaveLength(0);
     expect(c.integrity).toBe(1);
-    expect(c.detail).toBe('汤 100%');
+    expect(c.status).toEqual({ kind: 'soup', pct: 100 });
   });
 
   it('cruising straight and ordinary acceleration / braking spill nothing', () => {
@@ -89,7 +89,7 @@ describe('pizza tower', () => {
     const c = new PizzaCargo(5);
     expect(run(c, 20, A(), 0, 0)).toHaveLength(0);
     expect(c.integrity).toBe(1);
-    expect(c.detail).toBe('披萨 5/5');
+    expect(c.status).toEqual({ kind: 'pizza', boxes: 5, size: 5 });
   });
 
   it('moderate driving keeps the tower up', () => {
@@ -153,7 +153,7 @@ describe('ice cream', () => {
     run(still, 9, A(), 0, 0);
     expect(still.melt).toBeCloseTo(0.15, 2);
     expect(moving.integrity).toBeCloseTo(1 - 0.7 * 0.1, 2);
-    expect(moving.detail).toBe('冰淇淋 3/3 · 融化 10%');
+    expect(moving.status).toEqual({ kind: 'ice', scoops: 3, size: 3, meltPct: 10 });
   });
 
   it('a hard vertical spike knocks the top scoop off; gentle bumps do not', () => {

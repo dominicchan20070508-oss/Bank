@@ -1,9 +1,11 @@
-// In-game HUD (Simplified Chinese). Plain DOM; updated cheaply (text/width only when changed).
-import { ORDERS } from '../../shared/constants';
+// In-game HUD (text through i18n). Plain DOM; updated cheaply (text/width only when changed).
+import { ORDERS, TOUCH } from '../../shared/constants';
 import type { CityMap } from '../../shared/map';
-import { FOOD_INFO, REQUEST_INFO, type Order } from '../../shared/orders';
+import { REQUEST_INFO, type Order } from '../../shared/orders';
 import { starThresholds } from '../../shared/scoring';
 import { foodIconURL } from '../icons';
+import { onLangChange, placeName, t } from '../i18n';
+import { esc } from './dom';
 import { Popups } from './popups';
 
 export interface OrdersContext {
@@ -11,6 +13,16 @@ export interface OrdersContext {
   myId: string;
   nameOf: (playerId: string) => string;
 }
+
+export interface ScreenRect {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/** short screens (phones in landscape) get the compact HUD */
+export const isCompactScreen = () => window.innerHeight <= TOUCH.COMPACT_HEIGHT;
 
 interface Card {
   el: HTMLElement;
@@ -34,6 +46,8 @@ export class Hud {
   private readonly cargoFill: HTMLElement;
   private readonly cargoHint: HTMLElement;
   private readonly kmhEl: HTMLElement;
+  private readonly kmh2El: HTMLElement;
+  private readonly muteEl: HTMLElement;
   private readonly keysEl: HTMLElement;
   private readonly resetFill: HTMLElement;
   private readonly arrowEl: HTMLElement;
@@ -48,6 +62,7 @@ export class Hud {
   private readonly moreEl: HTMLElement;
   private ctx: OrdersContext | null = null;
   private last = new Map<string, string>();
+  private bottomLimit: () => number = () => Infinity;
 
   constructor(parent: HTMLElement, debug: boolean) {
     this.root = document.createElement('div');
@@ -56,18 +71,20 @@ export class Hud {
     this.root.innerHTML = `
       <div class="hud-tl panel">
         <div class="hud-time" data-k="time">4:00</div>
-        <div class="hud-tips">团队小费 <b data-k="tips">¥0</b></div>
+        <div class="hud-tips"><span data-t="hud.tips"></span> <b data-k="tips">¥0</b></div>
         <div class="stars"><div class="fill" data-k="starfill"></div></div>
+        <div class="hud-spd"><span class="kmh" data-k="kmh2">0</span> <span data-t="hud.kmh"></span></div>
       </div>
+      <div class="hud-mute" data-k="mute" role="button" tabindex="-1"></div>
       <div class="hud-orders" data-k="orders"></div>
       <div class="hud-cargo panel">
-        <div class="cargo-label"><img data-k="cicon" alt="" hidden /><span data-k="clabel">空手</span></div>
+        <div class="cargo-label"><img data-k="cicon" alt="" hidden /><span data-k="clabel"></span></div>
         <div class="cargo-bar"><i data-k="cfill"></i></div>
         <div class="cargo-hint" data-k="chint"></div>
       </div>
       <div class="hud-bl panel">
-        <div><span class="kmh" data-k="kmh">0</span> km/h</div>
-        <div class="keys" data-k="keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 骑行 · <kbd>空格</kbd> 手刹 · <kbd>H</kbd> 喇叭 · <kbd>R</kbd> 扶正</div>
+        <div><span class="kmh" data-k="kmh">0</span> <span data-t="hud.kmh"></span></div>
+        <div class="keys" data-k="keys"></div>
         <div class="reset-cd"><i data-k="reset"></i></div>
       </div>
       <div class="hud-mm panel" data-k="mm"></div>
@@ -92,6 +109,8 @@ export class Hud {
     this.cargoFill = q('cfill');
     this.cargoHint = q('chint');
     this.kmhEl = q('kmh');
+    this.kmh2El = q('kmh2');
+    this.muteEl = q('mute');
     this.keysEl = q('keys');
     this.resetFill = q('reset');
     this.arrowEl = q('arrow');
@@ -113,8 +132,47 @@ export class Hud {
       this.dbgEl.className = 'dbg';
       this.root.append(this.dbgEl);
     } else this.dbgEl = null;
+    this.applyLang();
+    onLangChange(() => this.applyLang());
     // fade the key hints after a while
     setTimeout(() => (this.keysEl.style.opacity = '0.35'), 25000);
+  }
+
+  /** (Re)write the static labels in the current language. */
+  applyLang(): void {
+    this.root.querySelectorAll<HTMLElement>('[data-t]').forEach((n) => {
+      n.textContent = t(n.dataset.t as Parameters<typeof t>[0]);
+    });
+    this.keysEl.innerHTML = `<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> ${t('hud.keys.ride')} · <kbd>${t('hud.keys.space')}</kbd> ${t('hud.keys.handbrake')} · <kbd>H</kbd> ${t('hud.keys.horn')} · <kbd>R</kbd> ${t('hud.keys.reset')}`;
+    this.last.delete('clabel');
+  }
+
+  /** y (px) above which the order cards must stay, e.g. the top of the touch buttons */
+  setBottomLimit(fn: () => number): void {
+    this.bottomLimit = fn;
+  }
+
+  /** the speaker button in the top-right corner */
+  setMuteHandler(onToggle: () => void): void {
+    this.muteEl.addEventListener('click', onToggle);
+  }
+
+  setMuted(m: boolean): void {
+    this.muteEl.textContent = m ? '🔇' : '🔊';
+    this.muteEl.setAttribute('aria-label', t(m ? 'sound.unmute' : 'sound.mute'));
+    this.muteEl.classList.toggle('off', m);
+  }
+
+  /** on-screen rectangles of the HUD panels (the target arrow avoids them) */
+  rects(): ScreenRect[] {
+    const out: ScreenRect[] = [];
+    for (const sel of ['.hud-tl', '.hud-orders', '.hud-cargo', '.hud-bl', '.hud-mm', '.hud-mute']) {
+      const e = this.root.querySelector<HTMLElement>(sel);
+      if (!e) continue;
+      const r = e.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) out.push({ x0: r.left, y0: r.top, x1: r.right, y1: r.bottom });
+    }
+    return out;
   }
 
   /** write textContent only when it changed (cheap per-frame updates) */
@@ -192,16 +250,31 @@ export class Hud {
   /** Show as many cards as fit under the top-right corner (most important first) and say how many are hidden. */
   private fitCards(orderedIds: string[]): void {
     this.lastOrder = orderedIds;
-    const room = Math.max(1, Math.floor((window.innerHeight - 250) / 78));
-    const visible = orderedIds.length <= room ? orderedIds.length : room - 1;
-    orderedIds.forEach((id, i) => {
-      const c = this.cards.get(id);
-      if (c) c.el.hidden = i >= visible;
-    });
-    const hidden = orderedIds.length - visible;
-    this.moreEl.hidden = hidden <= 0;
-    this.moreEl.textContent = `还有 ${hidden} 单…`;
+    const compact = isCompactScreen();
+    const cards = orderedIds.map((id) => this.cards.get(id)).filter((c): c is Card => !!c);
+    for (const c of cards) c.el.hidden = false;
+    this.moreEl.hidden = true;
     this.ordersEl.append(this.moreEl);
+    const top = compact ? 50 : 58;
+    const avail = Math.min(window.innerHeight - top - (compact ? 10 : 236), this.bottomLimit() - top - 8);
+    const maxCards = compact ? 2 : ORDERS.POOL_MAX;
+    const fits = (budget: number): number => {
+      let used = 0;
+      let k = 0;
+      for (const c of cards) {
+        const h = c.el.offsetHeight + 6;
+        if (k >= maxCards || used + h > budget) break;
+        used += h;
+        k++;
+      }
+      return k;
+    };
+    let visible = fits(avail);
+    if (visible < cards.length) visible = Math.max(1, fits(avail - 26)); // leave room for the "N more" chip
+    cards.forEach((c, i) => (c.el.hidden = i >= visible));
+    const hidden = cards.length - visible;
+    this.moreEl.hidden = hidden <= 0;
+    this.moreEl.textContent = t('hud.more', { n: hidden });
   }
 
   private makeCard(o: Order, ctx: OrdersContext): Card {
@@ -211,12 +284,14 @@ export class Hud {
     el.className = 'order panel';
     el.style.borderLeftColor = hex(r.color);
     const size = o.food === 'soup' ? '' : ` ×${o.size}`;
-    const req = o.request ? `<div class="order-req ${o.request}">${REQUEST_INFO[o.request].icon} ${REQUEST_INFO[o.request].text}</div>` : '';
+    const req = o.request ? `<div class="order-req ${o.request}">${REQUEST_INFO[o.request].icon} ${esc(t(`req.${o.request}.text`))}</div>` : '';
     el.innerHTML = `
       <div class="order-head">
         <img alt="" src="${foodIconURL(o.food)}" />
-        <div class="order-route">${r.name} → ${cu.name}<small>${FOOD_INFO[o.food].name}${size}${o.request === 'backDoor' ? ' · 送后门' : ''}</small></div>
-        <span class="order-badge"></span>
+        <div class="order-route">
+          <div class="order-name">${esc(placeName(r))} → ${esc(placeName(cu))}</div>
+          <div class="order-meta"><small>${esc(t(`food.${o.food}`))}${size}${o.request === 'backDoor' ? ' · ' + esc(t('order.backDoor')) : ''}</small><span class="order-badge"></span></div>
+        </div>
       </div>${req}
       <div class="order-bar"><i></i></div>`;
     return { el, badge: el.querySelector('.order-badge')!, bar: el.querySelector('.order-bar > i')!, order: o };
@@ -244,18 +319,18 @@ export class Hud {
         const left = ORDERS.WAIT_EXPIRE - (serverNow - o.createdAt);
         frac = left / ORDERS.WAIT_EXPIRE;
         cls = frac < 0.25 ? 'late' : frac < 0.5 ? 'warn' : '';
-        badge = '待取';
+        badge = t('order.wait');
       } else if (o.status === 'carrying' && o.pickedAt !== null) {
         const left = o.timeLimit - (serverNow - o.pickedAt);
         frac = left / o.timeLimit;
         cls = left <= 0 ? 'late' : frac < 0.3 ? 'warn' : '';
-        const who = o.carrierId === ctx.myId ? '你' : ctx.nameOf(o.carrierId ?? '');
-        badge = left > 0 ? `配送中·${who} ${Math.ceil(left)}s` : `超时·${who}`;
+        const who = o.carrierId === ctx.myId ? t('order.you') : ctx.nameOf(o.carrierId ?? '');
+        badge = left > 0 ? t('order.carrying', { who, s: Math.ceil(left) }) : t('order.late', { who });
       } else if (o.status === 'expired') {
-        badge = '已过期';
+        badge = t('order.expired');
         frac = 0;
       } else {
-        badge = '已送达';
+        badge = t('order.delivered');
         frac = 1;
       }
       const w = `${Math.max(0, Math.min(1, frac)) * 100}%`;
@@ -269,7 +344,7 @@ export class Hud {
   setCargo(c: { kind: 'soup' | 'pizza' | 'ice'; integrity: number; detail: string } | null, hint: string): void {
     if (!c) {
       this.cargoIcon.hidden = true;
-      this.setText('clabel', this.cargoLabel, '空手');
+      this.setText('clabel', this.cargoLabel, t('hud.empty'));
       this.cargoFill.style.width = '0%';
       this.cargoFill.className = '';
     } else {
@@ -286,7 +361,9 @@ export class Hud {
   }
 
   setSpeed(mps: number, resetFrac: number): void {
-    this.setText('kmh', this.kmhEl, String(Math.round(mps * 3.6)));
+    const kmh = String(Math.round(mps * 3.6));
+    this.setText('kmh', this.kmhEl, kmh);
+    this.setText('kmh2', this.kmh2El, kmh);
     const w = `${Math.round((1 - resetFrac) * 100)}%`;
     if (this.resetFill.style.width !== w) this.resetFill.style.width = w;
   }

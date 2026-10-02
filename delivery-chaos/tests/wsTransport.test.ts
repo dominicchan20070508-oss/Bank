@@ -75,7 +75,7 @@ describe('WsTransport', () => {
     await victim.connect('z');
     await other.close(); // the server goes away
     await sleep(300);
-    expect(victimReason).toBe('连接断开');
+    expect(victimReason).toBe('closed');
     // sending on a dead connection is a silent no-op (no exception, no spam)
     expect(() => victim.send({ type: 'honk' })).not.toThrow();
   });

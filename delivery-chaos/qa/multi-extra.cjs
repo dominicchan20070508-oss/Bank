@@ -64,7 +64,7 @@ const check = (ok, label, extra = '') => {
     const B = await mk('B');
 
     // --- host via the MENU buttons, guest via the code box
-    await A.page.goto(`${BASE}/?nosfx&name=阿强`);
+    await A.page.goto(`${BASE}/?nosfx&lang=zh&name=阿强`);
     await A.page.click('[data-k="create"]');
     await A.page.waitForFunction(() => window.__game.getState().roomCode, null, { timeout: 15000 });
     const code = (await st(A.page)).roomCode;
@@ -74,7 +74,7 @@ const check = (ok, label, extra = '') => {
     await A.page.waitForSelector('.notice-toast', { timeout: 3000 });
     check((await A.page.innerText('.notice-toast')).includes(`/?room=${code}`), 'copy-invite button reports the link', await A.page.innerText('.notice-toast'));
 
-    await B.page.goto(`${BASE}/?nosfx&name=小美`);
+    await B.page.goto(`${BASE}/?nosfx&lang=zh&name=小美`);
     await B.page.click('[data-k="join"]');
     await B.page.fill('#dc-code', code.toLowerCase());
     await B.page.click('[data-k="go"]');
@@ -125,11 +125,11 @@ const check = (ok, label, extra = '') => {
 
     // --- error paths via URL
     const C = await mk('C');
-    await C.page.goto(`${BASE}/?room=${code}&name=迟到&nosfx`);
+    await C.page.goto(`${BASE}/?room=${code}&name=迟到&nosfx&lang=zh`);
     await C.page.waitForSelector('.notice-toast', { timeout: 8000 });
     const errText = await C.page.innerText('.notice-toast');
     check(errText.includes('房间正在游戏中，请等下一局') && (await st(C.page)).phase === 'menu', 'joining a playing room → message + back to menu', errText);
-    await C.page.goto(`${BASE}/?room=ZZZZ&name=迷路&nosfx`);
+    await C.page.goto(`${BASE}/?room=ZZZZ&name=迷路&nosfx&lang=zh`);
     await C.page.waitForSelector('.notice-toast', { timeout: 8000 });
     check((await C.page.innerText('.notice-toast')).includes('房间不存在'), 'unknown room code → 房间不存在', await C.page.innerText('.notice-toast'));
 

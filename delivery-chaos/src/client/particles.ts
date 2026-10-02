@@ -13,6 +13,8 @@ export class Particles {
   private readonly grav: Float32Array;
   private readonly baseCol: Float32Array;
   private cursor = 0;
+  /** 1 = full effects; phones use less (TOUCH.PARTICLE_SCALE) */
+  countScale = 1;
   private readonly geo = new THREE.BufferGeometry();
   private readonly mat: THREE.PointsMaterial;
   private readonly tex: THREE.CanvasTexture;
@@ -53,7 +55,8 @@ export class Particles {
     const spread = opts.spread ?? 3;
     const dir = opts.dir ?? [0, 0, 0];
     const g = opts.gravity ?? 12;
-    for (let k = 0; k < count; k++) {
+    const n = this.countScale >= 1 ? count : Math.max(1, Math.round(count * this.countScale));
+    for (let k = 0; k < n; k++) {
       const i = this.cursor;
       this.cursor = (this.cursor + 1) % this.n;
       this.pos[i * 3] = x;

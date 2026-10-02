@@ -112,8 +112,9 @@ export class GameRoom {
     this.flushOrders(now);
   }
 
-  private cleanName(name: unknown, color: number): string {
-    return sanitizeName(name) || `骑手${color + 1}`;
+  /** An empty name stays empty: every client shows its own language's default ("Rider 2" / "骑手2") from the colour index. */
+  private cleanName(name: unknown, _color: number): string {
+    return sanitizeName(name);
   }
 
   private roomInfo(): ServerMsg {
@@ -466,7 +467,6 @@ export class GameRoom {
       tip: b.tip,
       teamTips: this.teamTips,
       parts: b.parts,
-      summary: b.summary,
       quote: integrityQuote(o.food, integrity),
       onTime: b.onTime,
     });

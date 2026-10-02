@@ -230,7 +230,7 @@ delivery-chaos/
 - `start {seed, duration, serverTime}` · `orders {list}`（有变化时）
 - `snap {t, players:{id: state}}` —— 20 Hz 合批
 - `event {type:'pickup'|'deliver'|'expire'|'honk'|'debris'|'crash', ...}`
-- `results {teamTips, stars, players:[...统计], awards:[...]}` · `error {msg}`
+- `results {teamTips, stars, players:[...统计], awards:[...]}` · `error {code}`（客户端按语言显示文字，v0.2 起）
 
 - 房间码：4 位大写字母（去掉易混的 I/O）。最多 4 人。房主掉线 → 下一个人当房主。
 - 远端玩家渲染在 **100 ms 前** 的时间点做插值；远端的货物用 `cargo` 概要画出来（看得到队友的披萨塔在晃）。

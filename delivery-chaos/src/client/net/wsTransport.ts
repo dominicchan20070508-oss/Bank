@@ -1,3 +1,4 @@
+// Failures are reported as codes ('timeout' | 'unreachable' | 'closed'); the app shows them in the player's language.
 // Online transport: JSON over a WebSocket to the same origin at /ws (wss when the page is https), plus a small
 // ping/pong clock sync so every client's serverNow() agrees with the server clock to within a few tens of ms.
 import type { ClientMsg, ServerMsg } from '../../shared/protocol';
@@ -41,7 +42,7 @@ export class WsTransport implements Transport {
         else resolve();
       };
       const timeout = setTimeout(() => {
-        settle(new Error('连接超时'));
+        settle(new Error('timeout'));
         this.ws?.close();
       }, 8000);
 
@@ -49,7 +50,7 @@ export class WsTransport implements Transport {
       try {
         ws = new WebSocket(this.url);
       } catch {
-        settle(new Error('无法连接服务器'));
+        settle(new Error('unreachable'));
         return;
       }
       this.ws = ws;
@@ -85,13 +86,13 @@ export class WsTransport implements Transport {
         }
       };
       ws.onerror = () => {
-        if (!this.opened) settle(new Error('无法连接服务器'));
+        if (!this.opened) settle(new Error('unreachable'));
       };
       ws.onclose = () => {
         this.stopSync();
-        if (!this.opened) settle(new Error('无法连接服务器'));
+        if (!this.opened) settle(new Error('unreachable'));
         if (this.intentionalClose) return;
-        for (const h of [...this.closeHandlers]) h('连接断开');
+        for (const h of [...this.closeHandlers]) h('closed');
       };
     });
   }

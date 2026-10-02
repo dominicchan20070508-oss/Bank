@@ -204,12 +204,12 @@ describe('room lifecycle', () => {
     const a = await connect(debugServer);
     const b = await connect(debugServer);
     b.send({ type: 'joinRoom', code: 'ZZZZ' });
-    expect(((await b.waitFor(isErr)) as { msg: string }).msg).toBe(ERR.notFound);
+    expect(((await b.waitFor(isErr)) as { code: string }).code).toBe(ERR.notFound);
 
     a.send({ type: 'createRoom' });
     const code = room(await a.waitFor(isRoom)).code;
     a.send({ type: 'createRoom' });
-    expect(((await a.waitFor(isErr)) as { msg: string }).msg).toBe(ERR.inRoom);
+    expect(((await a.waitFor(isErr)) as { code: string }).code).toBe(ERR.inRoom);
 
     // fill the room (4 max); the 5th is refused
     const extra = [];
@@ -221,15 +221,15 @@ describe('room lifecycle', () => {
     }
     const fifth = await connect(debugServer);
     fifth.send({ type: 'joinRoom', code });
-    expect(((await fifth.waitFor(isErr)) as { msg: string }).msg).toBe(ERR.full);
+    expect(((await fifth.waitFor(isErr)) as { code: string }).code).toBe(ERR.full);
     expect(room((await a.waitFor((m) => isRoom(m) && room(m).players.length === 4))).players).toHaveLength(4);
 
     // a room that is playing refuses newcomers with the exact message the client shows
     a.send({ type: 'startGame', duration: 30 });
     await a.waitFor((m) => m.type === 'start');
     b.send({ type: 'joinRoom', code });
-    const err = (await b.waitFor((m) => isErr(m) && (m as { msg: string }).msg !== ERR.notFound)) as { msg: string };
-    expect(err.msg).toBe('房间正在游戏中，请等下一局');
+    const err = (await b.waitFor((m) => isErr(m) && (m as { code: string }).code !== ERR.notFound)) as { code: string };
+    expect(err.code).toBe('playing');
     expect(b.of('room')).toHaveLength(0);
     [a, b, fifth, ...extra].forEach((c) => c.close());
     await sleep(150);
@@ -237,7 +237,7 @@ describe('room lifecycle', () => {
     // an empty room is gone: its code no longer works
     const late = await connect(debugServer);
     late.send({ type: 'joinRoom', code });
-    expect(((await late.waitFor(isErr)) as { msg: string }).msg).toBe(ERR.notFound);
+    expect(((await late.waitFor(isErr)) as { code: string }).code).toBe(ERR.notFound);
   }, 20000);
 
   it('lets a newcomer join between rounds (results phase)', async () => {
@@ -266,7 +266,7 @@ describe('a production server (no DC_DEBUG)', () => {
     expect(start.duration).toBe(240);
     expect(start.seed).not.toBe(5);
     a.send({ type: 'debugGive' });
-    expect(((await a.waitFor(isErr)) as { msg: string }).msg).toBe(ERR.debugOff);
+    expect(((await a.waitFor(isErr)) as { code: string }).code).toBe(ERR.debugOff);
     await sleep(150);
     expect(a.events('pickup')).toHaveLength(0);
     a.close();
