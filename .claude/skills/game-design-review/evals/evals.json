@@ -1,0 +1,53 @@
+{
+  "skill_name": "game-design-review",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "我让豆包帮我想了外卖大乱送的升级方案，在附件 delivery-chaos-upgrade-brief.docx 里。有道理吗你看看，应该先做哪些？",
+      "expected_output": "A Chinese review card per idea (10 ideas) with corrected difficulty grounded in code facts (debris is client-only cosmetic → cargo pickup is 中高; no AI driving → dispatcher autopilot is 高; position-dependent dog is 中高), rule conflicts (one order per player vs pickup/hand-off; streak multiplier inflates STAR_PER_PLAYER; 1 dispatcher+3 riders removes a rider in 2p), cheaper slices (claim-an-order instead of dispatcher), playtest-first step 0, ranked table and next batch.",
+      "files": [
+        "inputs/delivery-chaos-upgrade-brief.docx"
+      ],
+      "assertions": [
+        "Gives an explicit verdict (do / shrink / playtest first / don't) for each of the 10 ideas in the brief",
+        "Rates cargo pickup (4.1) harder than the brief's 中 because flying debris is client-local cosmetic and not synchronized between players",
+        "Rates the dispatcher (4.2) auto-drive part as high difficulty because the game has no AI driving / pathfinding",
+        "Points out the one-order-per-player rule conflicts with picking up or handing off cargo",
+        "Points out the streak tip multiplier (4.7) would inflate tips and require raising the star thresholds",
+        "Recommends a real playtest with friends before building the brief's P0 items",
+        "Offers a cheaper alternative to the full dispatcher, such as claiming/reserving an order",
+        "Ends with a ranked summary table of all ideas",
+        "The reply is written in Simplified Chinese"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "我朋友玩完给了几个点子：1. 加个排行榜，看谁送得最多 2. 可以撞别的玩家让他的汤洒掉，超好笑 3. 加一辆能开的小货车，一次能装很多单 4. 顾客给差评的时候头上冒火。你觉得哪些值得做？",
+      "expected_output": "Leaderboard rejected or reduced (no accounts/DB → localStorage-only or in-round only; also competitive). Ramming teammates flagged against co-op pillar (and bikes don't collide with each other today) — maybe reframe as shared-value comedy. Truck = new vehicle physics + breaks one-order rule → 高/暂缓. Angry-customer fire = cheap juice → do. Ranked table and next batch.",
+      "files": [],
+      "assertions": [
+        "Rejects or reduces the leaderboard because there are no accounts/database (suggests in-round or localStorage-only instead)",
+        "Flags ramming teammates to spill their soup as conflicting with the co-op pillar (or notes bikes don't collide with each other today)",
+        "Rates the drivable truck as high difficulty or defers it, citing new vehicle physics or the one-order-per-player rule",
+        "Recommends the angry-customer fire effect as a cheap, worthwhile idea",
+        "Ends with a ranked summary table",
+        "The reply is written in Simplified Chinese"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "昨晚和3个朋友用手机玩了4局。大家反馈：汤太容易洒，送到基本只剩一半；手机上转弯不好控制，老是撞墙；两个人经常抢同一单，骑到餐厅才发现被别人拿走了；最好笑的是披萨飞出去的时候大家都在叫。最后都只拿到1星。下一步该改什么？",
+      "expected_output": "Treats real playtest feedback as top evidence; proposes tuning via constants (soup gain/spill, steering sensitivity/pad deadzone, star thresholds for 4p) rather than big features; proposes claim/reserve order marker for the 抢单 problem; protects/amplifies the pizza moment; suggests what data to collect next; concrete next batch.",
+      "files": [],
+      "assertions": [
+        "Proposes reducing soup spill by tuning existing parameters (names src/shared/constants.ts or specific soup constants)",
+        "Proposes a concrete fix for hard touch steering (sensitivity, dead zone, steering assist or pad changes), not just 'improve controls'",
+        "Proposes a claim/reserve or 'who is heading where' marker to fix two players racing for the same order",
+        "Addresses everyone getting only 1 star by checking or adjusting star thresholds for 4 players (STAR_PER_PLAYER)",
+        "Explicitly keeps or amplifies the flying-pizza moment as the thing that works",
+        "Gives a concrete next batch plus what to observe or measure in the next playtest",
+        "The reply is written in Simplified Chinese"
+      ]
+    }
+  ]
+}
