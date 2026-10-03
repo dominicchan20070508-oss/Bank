@@ -7,6 +7,7 @@ export interface MenuCallbacks {
   onCreate(name: string): void;
   onJoin(name: string, code: string): void;
   onToggleMute(): void;
+  onSettings(): void;
 }
 
 /** The player's saved name ('' = none: every client then shows its own language's "Rider N"). */
@@ -33,6 +34,8 @@ export class Menu {
   private soonShown = false;
   private muted = false;
   private cb: MenuCallbacks;
+  private status: { up: boolean; secs: number } = { up: false, secs: 0 };
+  private wakeHint = false;
 
   constructor(
     parent: HTMLElement,
@@ -68,10 +71,12 @@ export class Menu {
           <button data-lang="zh" class="${lang === 'zh' ? 'on' : ''}">${t('lang.zh')}</button><button data-lang="en" class="${lang === 'en' ? 'on' : ''}">${t('lang.en')}</button>
         </div>
         <button class="icon-btn" data-k="mute" aria-label="${esc(t(this.muted ? 'sound.unmute' : 'sound.mute'))}">${this.muted ? '🔇' : '🔊'}</button>
+        <button class="icon-btn" data-k="settings" aria-label="${esc(t('settings.open'))}">⚙</button>
       </div>
       <div class="card panel">
         <h1 class="title">${t('menu.title')}</h1>
         <div class="subtitle">${t('menu.subtitle')}</div>
+        <div class="srv" data-k="srv" role="status"><i class="srv-dot"></i><span data-k="srvtext"></span></div>
         <div class="field"><label for="dc-name">${t('menu.name')}</label><input id="dc-name" maxlength="12" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="${esc(t('menu.namePlaceholder'))}" /></div>
         <button class="btn" data-k="solo">${t('menu.solo')}</button>
         <div class="row">
@@ -80,6 +85,7 @@ export class Menu {
         </div>
         <div class="field" data-k="joinrow" ${this.joinOpen ? '' : 'hidden'}><label for="dc-code">${t('menu.code')}</label><input id="dc-code" class="code-input" maxlength="4" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" placeholder="ABCD" /><button class="btn small" data-k="go">${t('menu.go')}</button></div>
         <div class="soon" data-k="soon" style="display:${this.soonShown ? 'block' : 'none'}">${t('menu.soon')}</div>
+        <div class="wake" data-k="wake" ${this.wakeHint ? '' : 'hidden'}>${t('status.wakingHint')}</div>
         <div class="help">
           <span class="help-kbd"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / ${t('menu.arrows')} ${t('menu.ride')} · <kbd>${t('menu.key.space')}</kbd> ${t('menu.handbrake')} · <kbd>H</kbd> ${t('menu.horn')} · <kbd>R</kbd> ${t('menu.reset')}<br /></span>
           <span class="help-touch">${t('menu.help.touch')}<br /></span>
@@ -100,6 +106,8 @@ export class Menu {
       }),
     );
     q('mute').addEventListener('click', () => this.cb.onToggleMute());
+    q('settings').addEventListener('click', () => this.cb.onSettings());
+    this.paintStatus();
     q('solo').addEventListener('click', () => this.cb.onSolo(this.name()));
     q('create').addEventListener('click', () => {
       if (this.onlineAvailable) this.cb.onCreate(this.name());
@@ -121,6 +129,30 @@ export class Menu {
     codeInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') this.cb.onJoin(this.name(), codeInput.value.trim().toUpperCase());
     });
+  }
+
+  /** server wake-up status (DESIGN §14.1): green dot when /healthz answers, yellow with the seconds waited until then */
+  setServerStatus(up: boolean, secs: number): void {
+    this.status = { up, secs };
+    if (up) this.wakeHint = false;
+    this.paintStatus();
+  }
+
+  /** "the depot is opening, try solo practice meanwhile" under the buttons */
+  showWakeHint(on: boolean): void {
+    this.wakeHint = on;
+    const w = this.root.querySelector<HTMLElement>('[data-k="wake"]');
+    if (w) w.hidden = !on;
+  }
+
+  private paintStatus(): void {
+    const box = this.root.querySelector<HTMLElement>('[data-k="srv"]');
+    const txt = this.root.querySelector<HTMLElement>('[data-k="srvtext"]');
+    if (!box || !txt) return;
+    box.classList.toggle('up', this.status.up);
+    box.classList.toggle('waking', !this.status.up);
+    const text = this.status.up ? t('status.up') : t('status.waking', { s: this.status.secs });
+    if (txt.textContent !== text) txt.textContent = text;
   }
 
   showSoon(): void {

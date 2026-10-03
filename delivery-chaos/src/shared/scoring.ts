@@ -1,5 +1,5 @@
 // Tip formula, stars and awards (DESIGN §7). Pure functions.
-import { GAME, TIP } from './constants';
+import { GAME, QUICK, TIP } from './constants';
 import type { FoodKind } from './map';
 import type { RequestId } from './orders';
 
@@ -13,10 +13,12 @@ export interface PlayerStats {
   honks: number;
   maxAirTime: number; // seconds
   integritySum: number;
+  salvages: number; // salvage zones collected for a teammate (DESIGN §14.3)
+  pings: number; // quick-chat messages sent by hand (the automatic crash SOS does not count)
 }
 
 export function emptyStats(): PlayerStats {
-  return { deliveries: 0, tips: 0, crashes: 0, soupSpilled: 0, pizzasLost: 0, scoopsLost: 0, honks: 0, maxAirTime: 0, integritySum: 0 };
+  return { deliveries: 0, tips: 0, crashes: 0, soupSpilled: 0, pizzasLost: 0, scoopsLost: 0, honks: 0, maxAirTime: 0, integritySum: 0, salvages: 0, pings: 0 };
 }
 
 export function baseTip(distance: number, food: FoodKind, size: number): number {
@@ -118,7 +120,7 @@ export function starsFor(teamTips: number, playerCount: number): number {
 
 // ---------- awards ----------
 
-export type AwardId = 'tips' | 'crash' | 'soup' | 'air' | 'honk' | 'steady';
+export type AwardId = 'tips' | 'crash' | 'soup' | 'air' | 'honk' | 'steady' | 'salvage' | 'chat';
 
 /** An end-of-round award. Titles / detail lines are rendered by the client from `id` and `value` (i18n `award.*`). */
 export interface Award {
@@ -126,7 +128,7 @@ export interface Award {
   icon: string;
   playerId: string;
   playerName: string; // as the player typed it ('' = unnamed: the client shows "Rider N")
-  /** tips: ¥; crash / honk: count; soup: bowls; air: seconds; steady: average integrity 0..1 */
+  /** tips: ¥; crash / honk / salvage / chat: count; soup: bowls; air: seconds; steady: average integrity 0..1 */
   value: number;
 }
 
@@ -137,9 +139,12 @@ interface AwardDef {
   min: number;
 }
 
+// Order = priority when more than `max` awards qualify: the co-op awards sit near the top so they get seen.
 const AWARD_DEFS: AwardDef[] = [
   { id: 'tips', icon: '💰', value: (s) => s.tips, min: 1 },
+  { id: 'salvage', icon: '🦸', value: (s) => s.salvages, min: 1 },
   { id: 'crash', icon: '💥', value: (s) => s.crashes, min: 1 },
+  { id: 'chat', icon: '💬', value: (s) => s.pings, min: QUICK.CHATTER_MIN },
   { id: 'soup', icon: '🍲', value: (s) => s.soupSpilled, min: 0.2 },
   { id: 'air', icon: '🛫', value: (s) => s.maxAirTime, min: 0.5 },
   { id: 'honk', icon: '📯', value: (s) => s.honks, min: 3 },

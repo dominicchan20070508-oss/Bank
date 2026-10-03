@@ -2,6 +2,7 @@
 // JSON over WebSocket at /ws; `type` discriminates every message.
 import type { FoodKind } from './map';
 import type { Order } from './orders';
+import type { PingId } from './pings';
 import type { Award, PlayerStats, QuoteKey, TipPart } from './scoring';
 
 export type Vec3 = [number, number, number];
@@ -47,6 +48,9 @@ export type ClientMsg =
   | { type: 'debris'; kind: DebrisKind; p: Vec3; v: Vec3 }
   | { type: 'stat'; key: StatKey; delta: number }
   | { type: 'ping'; t: number } // clock sync: the server answers with `pong` carrying its own clock
+  | { type: 'quick'; id: PingId; orderId?: string } // quick-chat preset (orderId: the card the player tapped, for "claim")
+  | { type: 'salvage'; zoneId: string } // "I stopped in this salvage zone" (the server checks position / speed)
+  | { type: 'caps'; touch: boolean; autoGas: boolean } // anonymous device facts for the round-summary log
   | { type: 'debugGive'; orderId?: string }; // test hook; ignored unless the room allows debug
 
 // ---------------- server -> client ----------------
@@ -61,6 +65,16 @@ export interface PlayerResult extends RoomPlayerInfo {
 }
 
 export type ErrorCode = 'notFound' | 'playing' | 'full' | 'inRoom' | 'noRoom' | 'busy' | 'debugOff';
+
+/** A salvage zone left behind by a teammate who crashed while carrying an order (DESIGN §14.3). Times are server seconds. */
+export interface SalvageZoneInfo {
+  id: string;
+  ownerId: string;
+  x: number;
+  z: number;
+  food: FoodKind;
+  expiresAt: number;
+}
 
 export type RejectReason = 'taken' | 'busy' | 'far' | 'fast' | 'wrongDoor' | 'notCarrier' | 'state' | 'phase';
 
@@ -85,6 +99,8 @@ export type GameEvent =
   | { ev: 'honk'; playerId: string; p: Vec3; dog: boolean; orderId?: string }
   | { ev: 'debris'; playerId: string; kind: DebrisKind; p: Vec3; v: Vec3 }
   | { ev: 'crash'; playerId: string; p: Vec3 }
+  | { ev: 'ping'; playerId: string; pingId: PingId; orderId?: string }
+  | { ev: 'salvage'; zoneId: string; playerId: string; ownerId: string; tip: number; teamTips: number }
   | { ev: 'reject'; kind: 'pickup' | 'deliver'; orderId: string; reason: RejectReason };
 
 export interface ResultsMsg {
@@ -101,6 +117,7 @@ export type ServerMsg =
   | { type: 'start'; seed: number; duration: number; serverTime: number }
   | { type: 'orders'; t: number; teamTips: number; list: Order[] }
   | { type: 'snap'; t: number; players: Record<string, PlayerStateMsg> }
+  | { type: 'salvage'; t: number; list: SalvageZoneInfo[] } // the full list of open salvage zones, sent whenever it changes
   | ({ type: 'event' } & GameEvent)
   | ResultsMsg
   | { type: 'pong'; t: number; s: number } // t = the client's ping time echoed back, s = server clock (s)

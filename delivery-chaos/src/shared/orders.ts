@@ -40,6 +40,9 @@ export interface Order {
   // server-tracked flags for the special requests
   honkedNear: boolean;
   crashedDuring: boolean;
+  /** "这单我来" (informational only, never locks the order): who said it and until when (server seconds) */
+  claimedBy: string | null;
+  claimUntil: number | null;
 }
 
 export function isActive(o: Order): boolean {
@@ -119,5 +122,7 @@ export function createOrder(rng: Rng, map: CityMap, id: string, now: number, exi
     distance,
     honkedNear: false,
     crashedDuring: false,
+    claimedBy: null,
+    claimUntil: null,
   };
 }

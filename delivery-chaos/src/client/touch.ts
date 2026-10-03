@@ -1,7 +1,7 @@
 // On-screen touch controls (DESIGN §13.3): an analog steering pad on the left, throttle / brake / handbrake / horn /
 // reset buttons on the right. True multi-touch: every control tracks its own pointerId, so steering with one thumb
 // and holding the throttle with the other work at the same time.
-import { TOUCH } from '../shared/constants';
+import { QUICK, TOUCH } from '../shared/constants';
 import type { BikeInput } from './bike';
 import { t } from './i18n';
 import type { InputSource } from './inputMerge';
@@ -22,7 +22,18 @@ export function detectTouchDevice(win: Window = window): boolean {
 }
 
 type HoldKey = 'throttle' | 'brake' | 'handbrake';
-type TapKey = 'horn' | 'reset';
+type TapKey = 'reset';
+
+/** What the horn button talks to when it is held long enough to open the quick-chat wheel (DESIGN §14.3). */
+export interface QuickHost {
+  /** false in solo / outside a round: the horn then honks at once on press, exactly like v0.2 */
+  enabled(): boolean;
+  open(): void;
+  /** thumb offset from where the press started */
+  move(dx: number, dy: number): void;
+  /** commit = send the slice under the thumb (a release); false = abort */
+  close(commit: boolean): void;
+}
 
 export class TouchControls implements InputSource {
   readonly root: HTMLElement;
@@ -41,6 +52,8 @@ export class TouchControls implements InputSource {
   private honkQueued = false;
   private resetQueued = false;
   private visible = false;
+  private quick: QuickHost | null = null;
+  private hornPress: { id: number; x: number; y: number; timer: ReturnType<typeof setTimeout> | null; open: boolean } | null = null;
   private readonly cleanups: (() => void)[] = [];
 
   constructor(parent: HTMLElement) {
@@ -69,7 +82,8 @@ export class TouchControls implements InputSource {
     this.applyLang();
     this.wireSteer();
     for (const k of ['throttle', 'brake', 'handbrake'] as const) this.wireHold(k);
-    for (const k of ['horn', 'reset'] as const) this.wireTap(k);
+    this.wireHorn();
+    this.wireTap('reset');
 
     // never let a finger get "stuck": any interruption releases everything
     const release = () => this.releaseAll();
@@ -165,12 +179,59 @@ export class TouchControls implements InputSource {
     el.addEventListener('lostpointercapture', up);
   }
 
+  /**
+   * The horn button: a short tap honks (on release, so a hold can become the wheel instead), holding it ~0.35 s opens the
+   * quick-chat wheel under the thumb. With no wheel available (solo) it honks on press, as in v0.2.
+   */
+  private wireHorn(): void {
+    const el = this.buttons.get('horn')!;
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      el.classList.add('down');
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+      if (!this.quick?.enabled()) {
+        this.honkQueued = true;
+        return;
+      }
+      if (this.hornPress) return; // a second finger on the horn: ignore
+      const press = { id: e.pointerId, x: e.clientX, y: e.clientY, timer: null as ReturnType<typeof setTimeout> | null, open: false };
+      press.timer = setTimeout(() => {
+        press.timer = null;
+        if (this.hornPress !== press || !this.quick?.enabled()) return;
+        press.open = true;
+        this.quick.open();
+      }, QUICK.HOLD_MS);
+      this.hornPress = press;
+    });
+    el.addEventListener('pointermove', (e) => {
+      const p = this.hornPress;
+      if (!p || p.id !== e.pointerId || !p.open) return;
+      e.preventDefault();
+      this.quick?.move(e.clientX - p.x, e.clientY - p.y);
+    });
+    const end = (commit: boolean) => (e: PointerEvent) => {
+      el.classList.remove('down');
+      const p = this.hornPress;
+      if (!p || p.id !== e.pointerId) return;
+      this.hornPress = null;
+      if (p.timer) clearTimeout(p.timer);
+      if (p.open) this.quick?.close(commit);
+      else if (commit) this.honkQueued = true; // a short press = one honk
+    };
+    el.addEventListener('pointerup', end(true));
+    el.addEventListener('pointercancel', end(false));
+    el.addEventListener('lostpointercapture', end(false));
+  }
+
   private wireTap(key: TapKey): void {
     const el = this.buttons.get(key)!;
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
-      if (key === 'horn') this.honkQueued = true;
-      else this.resetQueued = true;
+      this.resetQueued = true;
       el.classList.add('down');
       try {
         el.setPointerCapture(e.pointerId);
@@ -207,6 +268,19 @@ export class TouchControls implements InputSource {
     return v;
   }
 
+  /** hook up the quick-chat wheel */
+  setQuickHost(h: QuickHost | null): void {
+    this.quick = h;
+  }
+
+  /** auto-gas on: the GAS button becomes BOOST */
+  setAutoGas(on: boolean): void {
+    const lb = this.root.querySelector<HTMLElement>('.tc-gas .lb')!;
+    lb.dataset.t = on ? 'touch.boost' : 'touch.throttle';
+    lb.textContent = t(on ? 'touch.boost' : 'touch.throttle');
+    this.root.classList.toggle('autogas', on);
+  }
+
   // ---------------------------------------------------------------- UI state
   setVisible(v: boolean): void {
     this.visible = v;
@@ -221,6 +295,12 @@ export class TouchControls implements InputSource {
   }
 
   releaseAll(): void {
+    if (this.hornPress) {
+      const p = this.hornPress;
+      this.hornPress = null;
+      if (p.timer) clearTimeout(p.timer);
+      if (p.open) this.quick?.close(false);
+    }
     this.endSteer();
     for (const s of Object.values(this.held)) s.clear();
     this.honkQueued = false;

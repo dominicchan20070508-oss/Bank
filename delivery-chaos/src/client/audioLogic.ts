@@ -1,5 +1,6 @@
 // Pure helpers behind audio.ts (no Web Audio, no DOM) so the numbers can be unit-tested.
 import { AUDIO } from '../shared/constants';
+import type { PingId } from '../shared/pings';
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 const lerp = (a: number, b: number, k: number) => a + (b - a) * k;
@@ -40,6 +41,30 @@ export function engineTargets(speed01: number, throttle: number, idleFor = 0): E
     cutoff: lerp(E.CUTOFF_IDLE, E.CUTOFF_MAX, drive),
     level,
   };
+}
+
+export interface PingNote {
+  f: number; // Hz
+  at: number; // s after the start
+  dur: number; // s
+}
+
+/** One distinct short phrase per quick-chat preset (DESIGN §14.3: "每条有自己的短提示音"). */
+export function pingNotes(id: PingId): { type: OscillatorType; notes: PingNote[] } {
+  switch (id) {
+    case 'claim': // "got it": two quick rising notes
+      return { type: 'triangle', notes: [{ f: 659, at: 0, dur: 0.13 }, { f: 880, at: 0.1, dur: 0.2 }] };
+    case 'help': // SOS: urgent alternating pair, three times
+      return { type: 'square', notes: [880, 660, 880, 660].map((f, i) => ({ f, at: i * 0.1, dur: 0.1 })) };
+    case 'wait': // soft low double tap
+      return { type: 'sine', notes: [{ f: 440, at: 0, dur: 0.16 }, { f: 440, at: 0.2, dur: 0.22 }] };
+    case 'follow': // little rising run
+      return { type: 'triangle', notes: [523, 659, 784].map((f, i) => ({ f, at: i * 0.07, dur: 0.14 })) };
+    case 'thanks': // warm falling third
+      return { type: 'sine', notes: [{ f: 880, at: 0, dur: 0.16 }, { f: 698, at: 0.13, dur: 0.3 }] };
+    case 'nice': // bright major arpeggio
+      return { type: 'triangle', notes: [784, 988, 1175].map((f, i) => ({ f, at: i * 0.08, dur: 0.2 })) };
+  }
 }
 
 /** Soup spilled since the last sound -> a light drip tick or a real splash. */

@@ -48,6 +48,15 @@ describe('bike controller', () => {
     expect(bike.speedFwd).toBeCloseTo(-BIKE.REVERSE_MAX, 0);
   });
 
+  it('starts moving from a standstill in every heading, including north (regression: solver residue read as "reversing")', () => {
+    for (const heading of [0, Math.PI / 2, Math.PI, -Math.PI / 2, 3.0, -2.5, 0.8]) {
+      const { bike, step } = setup(emptyMap(), 0, 0, heading);
+      step(IN(), 1); // let it settle at rest
+      step(IN({ throttle: 1 }), 1.5);
+      expect(bike.speed, `heading ${heading}`).toBeGreaterThan(8);
+    }
+  });
+
   it("can't turn on the spot", () => {
     const { bike, step } = setup();
     step(IN({ steer: 1 }), 1);

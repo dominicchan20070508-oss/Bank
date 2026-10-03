@@ -7,24 +7,32 @@
 // Testability: pass a BaseAudioContext (e.g. an OfflineAudioContext) as `opts.ctx`. Scheduling then uses the
 // context clock plus `clockOffset`, so a test can lay sounds out on a timeline and render them.
 import { AUDIO } from '../shared/constants';
-import { Throttle, engineTargets, isIdling, puttWave, softClipCurve, spillSound } from './audioLogic';
+import type { PingId } from '../shared/pings';
+import { AudioSessionFix } from './audioSession';
+import { Throttle, engineTargets, isIdling, pingNotes, puttWave, softClipCurve, spillSound } from './audioLogic';
+import { safeStorage } from './storage';
 
 const AC: typeof AudioContext | undefined =
   typeof window !== 'undefined' ? (window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext) : undefined;
 
 const MUTE_KEY = 'dc.muted';
+const VOLUME_KEY = 'dc.volume';
 
 export interface SfxOptions {
   /** inject an audio context (tests: OfflineAudioContext). Disables the gesture / visibility handling. */
   ctx?: BaseAudioContext;
   /** initial mute state when injecting (otherwise it is read from localStorage) */
   muted?: boolean;
+  /** initial volume 0..1 when injecting (otherwise from localStorage, default AUDIO.DEFAULT_VOLUME) */
+  volume?: number;
 }
 
 export interface SfxInfo {
   enabled: boolean;
   ctxState: string; // 'none' before the first gesture
   muted: boolean;
+  volume: number; // the player's slider, 0..1
+  session: string; // which iOS silent-switch fix is active: 'audioSession' | 'audioElement' | 'none'
   engineGain: number;
   masterGain: number;
   /** RMS of the last ~46 ms at the output */
@@ -39,10 +47,14 @@ export class Sfx {
   private noise: AudioBuffer | null = null;
   private engineOut: GainNode | null = null;
   private engineFilter: BiquadFilterNode | null = null;
+  private harmFilter: BiquadFilterNode | null = null;
   private engineOscs: { osc: OscillatorNode; mult: number }[] = [];
   private lfo: OscillatorNode | null = null;
   private readonly throttleMap = new Throttle();
   private muted = false;
+  private volume: number = AUDIO.DEFAULT_VOLUME;
+  private readonly session = new AudioSessionFix();
+  private readonly stateListeners = new Set<() => void>();
   private hidden = false;
   private lastEngineCall = 0;
   private idleSince = -1;
@@ -60,6 +72,7 @@ export class Sfx {
     this.injected = !!opts.ctx;
     if (opts.ctx) this.ctx = opts.ctx;
     this.muted = opts.muted ?? (this.injected ? false : loadMuted());
+    this.volume = clamp01(opts.volume ?? (this.injected ? AUDIO.DEFAULT_VOLUME : loadVolume()));
     if (this.injected && this.enabled) this.build();
   }
 
@@ -70,6 +83,7 @@ export class Sfx {
    */
   unlock(): void {
     if (!this.enabled || this.injected) return;
+    this.session.apply(); // iPhone: make the side mute switch not silence the game (a no-op elsewhere)
     try {
       if (!this.ctx) {
         if (!AC) return;
@@ -104,6 +118,41 @@ export class Sfx {
   private onStateChange(): void {
     // 'interrupted' (iOS: phone call, Siri, lock screen) / 'suspended' while the page is visible: the next gesture resumes it
     if (this.ctx?.state !== 'running') this.fadeEngineNow();
+    for (const f of [...this.stateListeners]) f();
+  }
+
+  /** AudioContext state for the UI ('none' until the first gesture creates it) */
+  state(): string {
+    return this.ctx?.state ?? 'none';
+  }
+
+  /** The "tap to turn sound on" banner is needed: sound is wanted (enabled, not muted) but the context is not running. */
+  needsUnlock(): boolean {
+    return this.enabled && !this.injected && !this.muted && this.state() !== 'running';
+  }
+
+  onStateChanged(fn: () => void): () => void {
+    this.stateListeners.add(fn);
+    return () => this.stateListeners.delete(fn);
+  }
+
+  /** Wake the context (call inside a gesture) and run `fn` as soon as it is running; never runs it when audio is unavailable. */
+  unlockThen(fn: () => void): void {
+    this.unlock();
+    const ctx = this.ctx as AudioContext | null;
+    if (!ctx) return;
+    if (ctx.state === 'running') fn();
+    else void ctx.resume?.().then(() => ctx.state === 'running' && fn(), () => {});
+  }
+
+  /** The banner was tapped: wake the context and confirm with a short sound once it runs. */
+  unlockWithConfirm(): void {
+    this.unlockThen(() => this.confirm());
+  }
+
+  /** QA: put the context to sleep, as a phone call or an app switch would (the banner must come back) */
+  debugSuspend(): void {
+    void (this.ctx as AudioContext | null)?.suspend?.().catch(() => {});
   }
 
   /**
@@ -171,11 +220,32 @@ export class Sfx {
   setMuted(m: boolean): void {
     this.muted = m;
     if (!this.injected) saveMuted(m);
+    this.applyMaster();
+    for (const f of [...this.stateListeners]) f();
+  }
+
+  private masterTarget(): number {
+    return this.muted ? 0 : AUDIO.MASTER_GAIN * this.volume;
+  }
+
+  private applyMaster(): void {
     if (this.master && this.ctx) {
       const t = this.now();
       this.master.gain.cancelScheduledValues(t);
-      this.master.gain.setTargetAtTime(m ? 0 : AUDIO.MASTER_GAIN, t, 0.015);
+      this.master.gain.setTargetAtTime(this.masterTarget(), t, 0.015);
     }
+  }
+
+  // ---------------------------------------------------------------- volume
+  getVolume(): number {
+    return this.volume;
+  }
+
+  /** player's volume slider, 0..1 (linear on the master gain). Saved on this device. */
+  setVolume(v: number): void {
+    this.volume = clamp01(Number.isFinite(v) ? v : AUDIO.DEFAULT_VOLUME);
+    if (!this.injected) saveVolume(this.volume);
+    this.applyMaster();
   }
 
   toggleMuted(): boolean {
@@ -187,7 +257,7 @@ export class Sfx {
   private build(): void {
     const ctx = this.ctx!;
     this.master = ctx.createGain();
-    this.master.gain.value = this.muted ? 0 : AUDIO.MASTER_GAIN;
+    this.master.gain.value = this.masterTarget();
     const comp = ctx.createDynamicsCompressor();
     const C = AUDIO.COMPRESSOR;
     comp.threshold.value = C.THRESHOLD;
@@ -247,6 +317,8 @@ export class Sfx {
       enabled: this.enabled,
       ctxState: this.ctx?.state ?? 'none',
       muted: this.muted,
+      volume: this.volume,
+      session: this.session.path,
       engineGain: this.engineOut?.gain.value ?? 0,
       masterGain: this.master?.gain.value ?? 0,
       level,
@@ -276,6 +348,25 @@ export class Sfx {
     depth.gain.value = 0.8;
     this.lfo.connect(depth).connect(amp.gain);
     this.lfo.start();
+    // mid-frequency harmonic layer (v0.3): 4x / 6x / 8x the body pitch = 300-1200 Hz, which phone speakers CAN reproduce.
+    // It shares the putt amplitude modulation, so the engine stays "putt-putt" and is now audible on a phone.
+    this.harmFilter = ctx.createBiquadFilter();
+    this.harmFilter.type = 'bandpass';
+    this.harmFilter.Q.value = 0.8;
+    this.harmFilter.frequency.value = E.CUTOFF_IDLE * 0.9;
+    const harmGain = ctx.createGain();
+    harmGain.gain.value = E.HARMONIC_MIX;
+    this.harmFilter.connect(harmGain).connect(amp);
+    for (const [type, mult, gain] of [['sawtooth', 4, 0.5], ['square', 6, 0.28], ['sawtooth', 8, 0.22]] as const) {
+      const osc = ctx.createOscillator();
+      osc.type = type;
+      osc.frequency.value = E.PITCH_IDLE * mult;
+      const g = ctx.createGain();
+      g.gain.value = gain;
+      osc.connect(g).connect(this.harmFilter);
+      osc.start();
+      this.engineOscs.push({ osc, mult });
+    }
     // soft body: triangle + sub sine + a whisper of sawtooth for the exhaust rasp
     for (const [type, mult, gain] of [['triangle', 1, 0.6], ['sine', 0.5, 0.3], ['sawtooth', 2, 0.16]] as const) {
       const osc = ctx.createOscillator();
@@ -311,6 +402,7 @@ export class Sfx {
     for (const { osc, mult } of this.engineOscs) osc.frequency.setTargetAtTime(tg.pitch * mult, t, 0.08);
     this.lfo.frequency.setTargetAtTime(tg.fireHz, t, 0.08);
     this.engineFilter.frequency.setTargetAtTime(tg.cutoff, t, 0.08);
+    this.harmFilter?.frequency.setTargetAtTime(tg.cutoff * 0.9, t, 0.08);
     this.engineOut.gain.setTargetAtTime(tg.level, t, tg.level === 0 ? AUDIO.ENGINE.IDLE_FADE_TC : 0.1);
   }
 
@@ -425,10 +517,10 @@ export class Sfx {
     this.noiseBurst(t, 0.06, AUDIO.THUD_PEAK * 0.4 * k, 'lowpass', 900, 200);
   }
 
-  /** delivery "ding-dong" */
-  chime(): void {
+  /** delivery "ding-dong" (`delay` s later: the volume test plays horn, then chime) */
+  chime(delay = 0): void {
     if (!this.ready || this.muted) return;
-    const t = this.now();
+    const t = this.now() + delay;
     const p = AUDIO.CHIME_PEAK;
     this.tone('sine', 1318, 1318, t, 0.5, p);
     this.tone('sine', 1046, 1046, t + 0.16, 0.7, p);
@@ -441,6 +533,45 @@ export class Sfx {
     const t = this.now();
     this.tone('triangle', 660, 660, t, 0.12, AUDIO.PICKUP_PEAK);
     this.tone('triangle', 990, 990, t + 0.09, 0.18, AUDIO.PICKUP_PEAK);
+  }
+
+  /** Quick-chat sound: every preset has its own short phrase (see PING_NOTES). `volume` 0..1 for far-away riders. */
+  ping(id: PingId, volume = 1): void {
+    if (!this.ready || this.muted || !this.throttle('ping', 150)) return;
+    const ctx = this.ctx!;
+    const t = this.now();
+    const { type, notes } = pingNotes(id);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = type === 'square' ? 2200 : 5000;
+    lp.connect(this.master!);
+    const peak = AUDIO.PING_PEAK * Math.min(1, Math.max(0.25, volume));
+    for (const n of notes) this.tone(type, n.f, n.f, t + n.at, n.dur, peak, lp);
+  }
+
+  /** a teammate's cargo was saved: bright coin-collect arpeggio */
+  salvage(): void {
+    if (!this.ready || this.muted || !this.throttle('salvage', 300)) return;
+    const t = this.now();
+    const p = AUDIO.SALVAGE_PEAK;
+    [784, 988, 1319, 1568].forEach((f, i) => {
+      this.tone('triangle', f, f, t + i * 0.075, 0.22, p);
+      this.tone('sine', f * 2, f * 2, t + i * 0.075, 0.12, p * 0.25);
+    });
+  }
+
+  /** the "sound is on" confirmation after the banner was tapped */
+  confirm(): void {
+    if (!this.ready || this.muted) return;
+    const t = this.now();
+    this.tone('triangle', 784, 784, t, 0.12, AUDIO.PICKUP_PEAK);
+    this.tone('triangle', 1175, 1175, t + 0.1, 0.22, AUDIO.PICKUP_PEAK);
+  }
+
+  /** volume-slider test: horn, then the delivery chime */
+  testSound(): void {
+    this.horn(1);
+    this.chime(0.62);
   }
 
   pop(): void {
@@ -461,6 +592,18 @@ export class Sfx {
   dispose(): void {
     this.detachLifecycle();
   }
+}
+
+const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+
+function loadVolume(): number {
+  const raw = safeStorage.getItem(VOLUME_KEY);
+  const v = raw === null ? NaN : Number(raw);
+  return Number.isFinite(v) ? clamp01(v) : AUDIO.DEFAULT_VOLUME;
+}
+
+function saveVolume(v: number): void {
+  safeStorage.setItem(VOLUME_KEY, String(Math.round(v * 100) / 100));
 }
 
 function loadMuted(): boolean {

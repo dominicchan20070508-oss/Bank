@@ -6,12 +6,14 @@
 //   outgoing:  opts.send(playerId, msg) / opts.broadcast(msg, exceptId?)
 //
 // Single-player runs this in the browser behind LocalTransport; the Phase B server runs one per room.
-import { GAME, ORDERS, ZONE } from './constants';
+import { GAME, ORDERS, QUICK, SALVAGE, SALVAGE_TIP, ZONE } from './constants';
 import { generateCity, type CityMap } from './map';
 import { createOrder, isActive, restaurantOf, targetDoor, type Order } from './orders';
-import type { ClientMsg, GameEvent, PlayerResult, PlayerStateMsg, ResultsMsg, RoomPhase, ServerMsg } from './protocol';
+import { PING_IDS, type PingId } from './pings';
+import type { ClientMsg, GameEvent, PlayerResult, PlayerStateMsg, ResultsMsg, RoomPhase, SalvageZoneInfo, ServerMsg } from './protocol';
 import { Rng, deriveSeed } from './rng';
 import { computeTip, emptyStats, integrityQuote, pickAwards, starsFor, type PlayerStats } from './scoring';
+import { buildRoundSummary, emptyPingCounts, type RoundSummary } from './summary';
 import { DEBRIS_KINDS, LIMITS, TokenBucket, clampLength, isFiniteNum, sanitizeCargo, sanitizeName, sanitizeVec3 } from './validate';
 
 export interface GameRoomOptions {
@@ -25,6 +27,8 @@ export interface GameRoomOptions {
   defaultDuration?: number;
   /** seed for games started without one; default derives from the start time */
   seedSource?: () => number;
+  /** called once when a round ends, with the anonymous summary (the server logs it; single player leaves this unset) */
+  onRoundEnd?: (summary: RoundSummary) => void;
 }
 
 export interface RoomPlayer {
@@ -37,6 +41,17 @@ export interface RoomPlayer {
   stats: PlayerStats;
   debrisLimit: TokenBucket;
   honkLimit: TokenBucket;
+  quickLimit: TokenBucket;
+  salvageLimit: TokenBucket;
+  capsLimit: TokenBucket;
+  lastQuickAt: number; // server seconds of the last accepted quick-chat message
+  /** anonymous device facts for the round-summary log (set by the `caps` message) */
+  touch: boolean;
+  autoGas: boolean;
+}
+
+export interface SalvageZone extends SalvageZoneInfo {
+  createdAt: number;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -56,6 +71,8 @@ export class GameRoom {
   startedAt = 0;
   endsAt = 0;
   lastResults: ResultsMsg | null = null;
+  /** open salvage zones (DESIGN §14.3); empty in single player */
+  salvage: SalvageZone[] = [];
 
   private readonly opts: GameRoomOptions;
   private rng = new Rng(1);
@@ -63,6 +80,10 @@ export class GameRoom {
   private respawnAt: number[] = [];
   private lastSnapAt = -Infinity;
   private ordersDirty = false;
+  private salvageDirty = false;
+  private nextSalvageId = 1;
+  private pingCounts: Record<PingId, number> = emptyPingCounts();
+  private claimCount = 0;
 
   constructor(opts: GameRoomOptions) {
     this.opts = opts;
@@ -93,6 +114,12 @@ export class GameRoom {
       stats: emptyStats(),
       debrisLimit: new TokenBucket(LIMITS.DEBRIS_PER_SEC),
       honkLimit: new TokenBucket(LIMITS.HONK_BROADCASTS_PER_SEC),
+      quickLimit: new TokenBucket(LIMITS.QUICK_PER_SEC),
+      salvageLimit: new TokenBucket(LIMITS.SALVAGE_PER_SEC),
+      capsLimit: new TokenBucket(LIMITS.CAPS_PER_SEC, 3),
+      lastQuickAt: -Infinity,
+      touch: false,
+      autoGas: false,
     });
     if (!this.hostId) this.hostId = id;
     this.broadcastRoom();
@@ -106,6 +133,7 @@ export class GameRoom {
       const o = this.orders.find((x) => x.id === p.carrying);
       if (o && o.status === 'carrying') this.endOrder(o, 'expired', now);
     }
+    for (const o of this.orders) if (o.claimedBy === id) this.clearClaim(o);
     this.players.delete(id);
     if (this.hostId === id) this.hostId = this.players.keys().next().value ?? null; // next in join order
     this.broadcastRoom();
@@ -150,6 +178,7 @@ export class GameRoom {
     this.teamTips = 0;
     this.nextOrderId = 1;
     this.lastResults = null;
+    this.resetCoop();
     for (const p of this.players.values()) {
       p.carrying = null;
       p.state = null;
@@ -176,6 +205,7 @@ export class GameRoom {
     this.teamTips = 0;
     this.map = null;
     this.lastResults = null;
+    this.resetCoop();
     for (const p of this.players.values()) {
       p.carrying = null;
       p.state = null;
@@ -185,8 +215,21 @@ export class GameRoom {
     this.broadcastRoom();
   }
 
+  private resetCoop(): void {
+    this.salvage = [];
+    this.salvageDirty = false;
+    this.nextSalvageId = 1;
+    this.pingCounts = emptyPingCounts();
+    this.claimCount = 0;
+    for (const p of this.players.values()) p.lastQuickAt = -Infinity;
+  }
+
   private finish(now: number): void {
     for (const o of this.orders) if (o.status === 'carrying') this.endOrder(o, 'expired', now, false);
+    if (this.salvage.length) {
+      this.salvage = [];
+      this.salvageDirty = true;
+    }
     for (const p of this.players.values()) p.carrying = null;
     this.phase = 'results';
     const list = [...this.players.values()];
@@ -200,8 +243,25 @@ export class GameRoom {
     };
     this.lastResults = results;
     this.flushOrders(now);
+    this.flushSalvage(now);
     this.opts.broadcast(results);
     this.broadcastRoom();
+    if (this.opts.onRoundEnd) {
+      try {
+        this.opts.onRoundEnd(
+          buildRoundSummary({
+            players: list,
+            durationS: Math.min(this.duration, now - this.startedAt),
+            teamTips: this.teamTips,
+            stars: results.stars,
+            pings: this.pingCounts,
+            claims: this.claimCount,
+          }),
+        );
+      } catch {
+        /* telemetry must never break a round */
+      }
+    }
   }
 
   // ------------------------------------------------------------------ tick
@@ -215,6 +275,12 @@ export class GameRoom {
     // waiting orders expire
     for (const o of this.orders) {
       if (o.status === 'waiting' && now - o.createdAt >= ORDERS.WAIT_EXPIRE) this.endOrder(o, 'expired', now);
+    }
+    // claims run out; salvage zones close
+    for (const o of this.orders) if (o.claimedBy && (o.claimUntil ?? 0) <= now) this.clearClaim(o);
+    if (this.salvage.some((z) => z.expiresAt <= now)) {
+      this.salvage = this.salvage.filter((z) => z.expiresAt > now);
+      this.salvageDirty = true;
     }
     // drop long-ended orders from the list
     const before = this.orders.length;
@@ -244,6 +310,7 @@ export class GameRoom {
       if (any && this.players.size > 1) this.opts.broadcast({ type: 'snap', t: now, players });
     }
     this.flushOrders(now);
+    this.flushSalvage(now);
   }
 
   timeLeft(now: number): number {
@@ -271,6 +338,8 @@ export class GameRoom {
     const wasWaiting = o.status === 'waiting';
     o.status = status;
     o.endedAt = now;
+    o.claimedBy = null;
+    o.claimUntil = null;
     this.ordersDirty = true;
     if (o.carrierId) {
       const c = this.players.get(o.carrierId);
@@ -287,6 +356,18 @@ export class GameRoom {
     if (!this.ordersDirty) return;
     this.ordersDirty = false;
     this.opts.broadcast({ type: 'orders', t: now, teamTips: this.teamTips, list: this.orders.map((o) => ({ ...o })) });
+  }
+
+  private flushSalvage(now: number): void {
+    if (!this.salvageDirty) return;
+    this.salvageDirty = false;
+    this.opts.broadcast({ type: 'salvage', t: now, list: this.salvage.map(({ createdAt: _c, ...z }) => z) });
+  }
+
+  private clearClaim(o: Order): void {
+    o.claimedBy = null;
+    o.claimUntil = null;
+    this.ordersDirty = true;
   }
 
   private emit(ev: GameEvent, exceptId?: string): void {
@@ -334,7 +415,19 @@ export class GameRoom {
         this.onDebris(p, msg, now);
         break;
       case 'stat':
-        this.onStat(p, msg.key, msg.delta);
+        this.onStat(p, msg.key, msg.delta, now);
+        break;
+      case 'quick':
+        this.onQuick(p, msg, now);
+        break;
+      case 'salvage':
+        this.onSalvage(p, msg.zoneId, now);
+        break;
+      case 'caps':
+        if (p.capsLimit.take(now)) {
+          p.touch = msg.touch === true;
+          p.autoGas = msg.autoGas === true;
+        }
         break;
       case 'debugGive':
         this.onDebugGive(p, msg.orderId, now);
@@ -343,6 +436,7 @@ export class GameRoom {
         break; // createRoom / joinRoom are handled by whoever owns the room registry
     }
     this.flushOrders(now);
+    this.flushSalvage(now);
   }
 
   /** Everything stored here is relayed to teammates in snapshots, so it is rebuilt field by field from checked values. */
@@ -382,6 +476,8 @@ export class GameRoom {
     o.status = 'carrying';
     o.carrierId = p.id;
     o.pickedAt = now;
+    o.claimedBy = null; // a taken order is no longer "claimed"
+    o.claimUntil = null;
     p.carrying = o.id;
     this.respawnAt.push(now + ORDERS.REFILL_DELAY);
     this.ordersDirty = true;
@@ -498,7 +594,7 @@ export class GameRoom {
     if (audible || firstDog) this.emit({ ev: 'honk', playerId: p.id, p: [pos[0], pos[1], pos[2]], dog, orderId: dogOrder });
   }
 
-  private onStat(p: RoomPlayer, key: string, delta: number): void {
+  private onStat(p: RoomPlayer, key: string, delta: number, now: number): void {
     if (this.phase !== 'playing' || !finite(delta)) return;
     switch (key) {
       case 'soupSpilled':
@@ -515,16 +611,106 @@ export class GameRoom {
         break;
       case 'crashes': {
         p.stats.crashes += 1;
-        if (p.carrying) {
-          const o = this.orders.find((x) => x.id === p.carrying);
-          if (o) o.crashedDuring = true;
-        }
+        const carried = p.carrying ? this.orders.find((x) => x.id === p.carrying) : undefined;
+        if (carried) carried.crashedDuring = true;
         const pos = p.state?.p ?? [0, 0, 0];
         this.emit({ ev: 'crash', playerId: p.id, p: [pos[0], pos[1], pos[2]] }, p.id);
+        if (this.players.size > 1) {
+          this.emit({ ev: 'ping', playerId: p.id, pingId: 'help' }, p.id); // the automatic SOS goes to teammates only
+          if (carried && p.state) this.openSalvage(p, carried, now);
+        }
         break;
       }
       default:
         break;
     }
+  }
+  // ------------------------------------------------------------------ quick chat (DESIGN §14.3)
+
+  /** The order a "这单我来" refers to: the card the player tapped, else the waiting order closest to them. */
+  private claimTarget(p: RoomPlayer, orderId: string | undefined, now: number): Order | null {
+    if (!this.map) return null;
+    const open = (o: Order) => o.status === 'waiting' && !(o.claimedBy && o.claimedBy !== p.id && (o.claimUntil ?? 0) > now);
+    if (orderId) {
+      const o = this.orders.find((x) => x.id === orderId);
+      if (o && open(o)) return o;
+    }
+    let best: Order | null = null;
+    let bestD = Infinity;
+    const s = p.state;
+    for (const o of this.orders) {
+      if (!open(o)) continue;
+      const door = restaurantOf(this.map, o).door;
+      const d = s ? (s.p[0] - door.x) ** 2 + (s.p[2] - door.z) ** 2 : o.createdAt;
+      if (d < bestD) {
+        bestD = d;
+        best = o;
+      }
+    }
+    return best;
+  }
+
+  private onQuick(p: RoomPlayer, m: Extract<ClientMsg, { type: 'quick' }>, now: number): void {
+    if (this.phase !== 'playing' || !this.map) return;
+    if (this.players.size < 2) return; // nobody to talk to
+    if (!(PING_IDS as readonly string[]).includes(m.id)) return;
+    if (!p.quickLimit.take(now)) return;
+    if (now - p.lastQuickAt < QUICK.COOLDOWN) return;
+    let orderId: string | undefined;
+    if (m.id === 'claim') {
+      if (p.carrying) return; // your hands are full: nothing to claim
+      const o = this.claimTarget(p, m.orderId, now);
+      if (!o) return;
+      for (const x of this.orders) if (x.claimedBy === p.id && x !== o) this.clearClaim(x); // one claim per rider
+      o.claimedBy = p.id;
+      o.claimUntil = now + QUICK.CLAIM_TTL;
+      this.ordersDirty = true;
+      this.claimCount++;
+      orderId = o.id;
+    }
+    p.lastQuickAt = now;
+    p.stats.pings++;
+    this.pingCounts[m.id]++;
+    this.emit({ ev: 'ping', playerId: p.id, pingId: m.id, orderId });
+  }
+
+  // ------------------------------------------------------------------ salvage zones (DESIGN §14.3)
+
+  /** A rider crashed with an order on the rack: leave a zone where it happened that teammates can stop in. */
+  private openSalvage(p: RoomPlayer, order: Order, now: number): void {
+    if (this.salvage.some((z) => z.ownerId === p.id)) return; // at most one per rider at a time
+    const s = p.state;
+    if (!s) return;
+    this.salvage.push({
+      id: `s${this.nextSalvageId++}`,
+      ownerId: p.id,
+      x: s.p[0],
+      z: s.p[2],
+      food: order.food,
+      createdAt: now,
+      expiresAt: now + SALVAGE.TTL,
+    });
+    this.salvageDirty = true;
+  }
+
+  private onSalvage(p: RoomPlayer, zoneId: string, now: number): void {
+    if (this.phase !== 'playing') return;
+    if (!p.salvageLimit.take(now)) return;
+    const z = this.salvage.find((x) => x.id === zoneId);
+    if (!z || z.expiresAt <= now) return;
+    if (z.ownerId === p.id) return; // you cannot rescue yourself
+    const s = p.state;
+    if (!s || s.crashed) return;
+    const dx = s.p[0] - z.x;
+    const dz = s.p[2] - z.z;
+    const r = ZONE.RADIUS + ZONE.SERVER_POS_TOLERANCE;
+    if (dx * dx + dz * dz > r * r) return;
+    if (s.v > ZONE.MAX_SPEED + ZONE.SERVER_SPEED_TOLERANCE) return;
+    this.salvage = this.salvage.filter((x) => x !== z); // collected exactly once
+    this.salvageDirty = true;
+    this.teamTips += SALVAGE_TIP;
+    this.ordersDirty = true; // the order list message carries teamTips
+    p.stats.salvages++;
+    this.emit({ ev: 'salvage', zoneId: z.id, playerId: p.id, ownerId: z.ownerId, tip: SALVAGE_TIP, teamTips: this.teamTips });
   }
 }

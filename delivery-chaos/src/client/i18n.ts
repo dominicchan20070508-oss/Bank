@@ -211,6 +211,64 @@ const zh = {
   'touch.reset': '扶正',
   'touch.rotate.title': '请把手机横过来',
   'touch.rotate.sub': '横屏才能玩外卖大乱送',
+  // ---- v0.3 ----
+  'touch.boost': '加速',
+  'award.salvage.title': '救汤侠',
+  'award.chat.title': '话痨骑手',
+  'award.salvage.detail': '回收了 {v} 次',
+  'award.salvage.detail.one': '回收了 1 次',
+  'award.chat.detail': '发了 {v} 条快捷语',
+
+  // quick chat
+  'ping.claim': '这单我来',
+  'ping.help': '救命！',
+  'ping.wait': '等等我',
+  'ping.follow': '跟我来',
+  'ping.thanks': '谢谢！',
+  'ping.nice': '干得漂亮！',
+  'ping.claimBy': '{who} 认领',
+  'ping.cancel': '取消',
+  'ping.noClaim': '现在没有可认领的订单',
+  'ping.wheelHint.touch': '滑向一格，松手发送',
+  'ping.wheelHint.keys': '按 1–6 发送 · 鼠标或←→选择，松开 H 发送',
+  'hud.keys.chat': '快捷语',
+  'float.honkOther': '📯 嘀嘀！',
+
+  // salvage
+  'salvage.float': '救汤侠 +¥{n}',
+  'salvage.thanks': '{who} 帮你回收了货！',
+  'salvage.zone': '回收点',
+  'zone.salvage': '回收中',
+
+  // first-session hints
+  'hint.start.touch': '拖左边转向，跟着箭头去亮起来的餐厅',
+  'hint.start.keys': '用 WASD 转向，跟着箭头去亮起来的餐厅',
+  'hint.approach': '开进圈里停一下，就能取餐 / 交货',
+  'hint.cargo': '货在晃！转弯慢一点',
+  'hint.crash.touch': '翻车啦！点 ↺ 扶正，或者等一下自动起来',
+  'hint.crash.keys': '翻车啦！按 R 扶正，或者等一下自动起来',
+  'hint.salvage': '队友翻车了，去回收点停一下能捡回小费',
+
+  // sound
+  'sound.banner': '🔊 点一下开启声音',
+  'sound.volume': '音量',
+  'sound.test': '试听',
+
+  // settings
+  'settings.title': '设置',
+  'settings.open': '设置',
+  'settings.done': '完成',
+  'settings.autoGas': '自动油门',
+  'settings.autoGas.desc': '车会自己往前开，进圈自动停；油门键变成「加速」',
+  'settings.steadyRack': '货架更稳',
+  'settings.steadyRack.desc': '货物晃得少一点，奖励不变',
+  'settings.muteChat': '屏蔽队友快捷语',
+
+  // server status
+  'status.up': '外卖站已开门',
+  'status.waking': '外卖站开门中… {s} 秒',
+  'status.wakingHint': '外卖站正在开门，约 30–60 秒，可以先点「单人练习」热身',
+  'status.ready': '外卖站开门了，正在连接…',
 } as const;
 
 export type MsgKey = keyof typeof zh;
@@ -405,6 +463,58 @@ const en: Record<MsgKey, string> = {
   'touch.reset': 'RESET',
   'touch.rotate.title': 'Rotate your phone',
   'touch.rotate.sub': 'Delivery Chaos is played in landscape',
+  // ---- v0.3 ----
+  'touch.boost': 'BOOST',
+  'award.salvage.title': 'Soup Savior',
+  'award.chat.title': 'Chatterbox',
+  'award.salvage.detail': 'Salvaged {v} times',
+  'award.salvage.detail.one': 'Salvaged once',
+  'award.chat.detail': 'Sent {v} quick chats',
+
+  'ping.claim': "I'll take this one",
+  'ping.help': 'Help!',
+  'ping.wait': 'Wait for me',
+  'ping.follow': 'Follow me',
+  'ping.thanks': 'Thanks!',
+  'ping.nice': 'Nice one!',
+  'ping.claimBy': '{who} has this',
+  'ping.cancel': 'Cancel',
+  'ping.noClaim': 'No order to claim right now',
+  'ping.wheelHint.touch': 'Slide to a slice, release to send',
+  'ping.wheelHint.keys': 'Press 1-6 to send · mouse or ←→ to pick, release H to send',
+  'hud.keys.chat': 'quick chat',
+  'float.honkOther': '📯 Beep beep!',
+
+  'salvage.float': 'Soup Savior +¥{n}',
+  'salvage.thanks': '{who} salvaged your cargo!',
+  'salvage.zone': 'Salvage',
+  'zone.salvage': 'Salvaging',
+
+  'hint.start.touch': 'Drag on the left to steer. Follow the arrow to the glowing restaurant.',
+  'hint.start.keys': 'Steer with WASD. Follow the arrow to the glowing restaurant.',
+  'hint.approach': 'Roll into the circle and stop for a moment to pick up / deliver',
+  'hint.cargo': 'The cargo is wobbling! Take corners gently.',
+  'hint.crash.touch': 'You crashed! Tap ↺ to get up, or just wait a moment.',
+  'hint.crash.keys': 'You crashed! Press R to get up, or just wait a moment.',
+  'hint.salvage': 'A teammate crashed! Stop in the salvage zone to win back some tips.',
+
+  'sound.banner': '🔊 Tap to turn sound on',
+  'sound.volume': 'Volume',
+  'sound.test': 'Test sound',
+
+  'settings.title': 'Settings',
+  'settings.open': 'Settings',
+  'settings.done': 'Done',
+  'settings.autoGas': 'Auto-gas',
+  'settings.autoGas.desc': 'The bike rolls on its own and stops in target circles; GAS becomes BOOST',
+  'settings.steadyRack': 'Steadier rack',
+  'settings.steadyRack.desc': 'Cargo wobbles less. Rewards are unchanged.',
+  'settings.muteChat': "Mute teammates' quick chat",
+
+  'status.up': 'Delivery depot is open',
+  'status.waking': 'Depot is opening… {s}s',
+  'status.wakingHint': 'The depot is waking up (about 30-60 s). Try Solo practice while you wait.',
+  'status.ready': 'The depot is open. Connecting…',
 };
 
 export const DICTIONARIES: Record<Lang, Record<MsgKey, string>> = { zh, en };

@@ -87,13 +87,13 @@ async function hudVsButtons(page) {
       return { x0: r.left, y0: r.top, x1: r.right, y1: r.bottom };
     };
     const buttons = [...document.querySelectorAll('.tc-btn')].map((e) => ({ n: e.dataset.k, r: rect(e) }));
-    const hud = [...document.querySelectorAll('.hud-tl, .hud-cargo, .hud-mm, .hud-mute, .hud-bl, .order, .orders-more')]
+    const hud = [...document.querySelectorAll('.hud-tl, .hud-cargo, .hud-mm, .hud-mute, .hud-gear, .hint, .hud-bl, .order, .orders-more')]
       .filter((e) => e.getBoundingClientRect().width > 0 && !e.closest('[hidden]') && getComputedStyle(e).display !== 'none')
       .map((e) => ({ n: String(e.className).split(' ')[0], r: rect(e) }));
     const hits = [];
     for (const b of buttons) for (const h of hud) if (b.r.x0 < h.r.x1 && b.r.x1 > h.r.x0 && b.r.y0 < h.r.y1 && b.r.y1 > h.r.y0) hits.push(`${h.n} x ${b.n}`);
     // the big HUD panels must not overlap each other either
-    const panels = [...document.querySelectorAll('.hud-tl, .hud-cargo, .hud-mm, .hud-mute, .hud-orders')]
+    const panels = [...document.querySelectorAll('.hud-tl, .hud-cargo, .hud-mm, .hud-mute, .hud-gear, .hud-orders')]
       .filter((e) => e.getBoundingClientRect().width > 0 && getComputedStyle(e).display !== 'none')
       .map((e) => ({ n: String(e.className).split(' ')[0], r: rect(e) }));
     for (let i = 0; i < panels.length; i++) for (let j = i + 1; j < panels.length; j++) {
@@ -254,7 +254,9 @@ async function section_touch() {
   const ctx = await browser.newContext(MOBILE1);
   const page = await ctx.newPage();
   watch(page, 'touch');
-  await page.goto(`${BASE}/?solo&seed=1&autostart&lang=en&nosfx&duration=300`);
+  // v0.3: touch defaults to auto-gas (the bike rolls by itself). These v0.2 checks are about the raw controls, so they run with
+  // auto-gas forced off (?autogas=0): "releasing GAS coasts" and "handbrake sheds speed faster than coasting" need that.
+  await page.goto(`${BASE}/?solo&seed=1&autostart&lang=en&nosfx&duration=300&autogas=0`);
   await page.waitForFunction(() => window.__game?.getState().phase === 'playing', null, { timeout: 20000 });
   await sleep(1200);
   const cdp = await ctx.newCDPSession(page);

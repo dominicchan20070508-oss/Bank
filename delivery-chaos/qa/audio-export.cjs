@@ -4,7 +4,9 @@
 //   node qa/audio-export.cjs [baseUrl] [outDir]     # defaults: http://localhost:8080  qa/audio
 //
 // Files: engine-idle / engine-half / engine-full (3 s each), horn, dog, splash-small, splash-big, crash, thud,
-// pickup, chime (delivery), fail, plus worst-case-mix (everything at once, through the limiter). Prints peak / RMS.
+// pickup, chime (delivery), fail, plus (v0.3) salvage, confirm, ping-<preset> x6, ping (all six in a row), test-sound
+// (horn + chime, the volume-slider test) and worst-case-mix (everything at once, through the limiter). Prints peak / RMS.
+// The volume slider is at its 80% default, exactly what a player hears.
 const path = require('node:path');
 const fs = require('node:fs');
 let chromium;

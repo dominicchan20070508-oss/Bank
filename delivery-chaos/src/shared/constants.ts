@@ -7,6 +7,9 @@
 //   * lean > 0 = leaning to the rider's RIGHT (three: rotation.z > 0 with YXZ order).
 //   * aLocal = (x: lateral accel toward the rider's right, y: vertical, z: forward), m/s^2.
 
+/** Shown in the round-summary log line (DESIGN §14.4). Keep in sync with package.json. */
+export const GAME_VERSION = '0.3.0';
+
 // ---------- Game / rules ----------
 export const GAME = {
   DURATION: 240, // seconds per round
@@ -25,6 +28,23 @@ export const ZONE = {
   SERVER_POS_TOLERANCE: 4, // server accepts reported positions this much outside the circle (lag)
   SERVER_SPEED_TOLERANCE: 4, // ... and this much extra speed
   HONK_RADIUS: 30, // noHorn: honking within this distance of the customer wakes the dog
+} as const;
+
+// ---------- Co-op (DESIGN §14.3) ----------
+/** Team tip (¥) for a teammate who stops in a salvage zone. */
+export const SALVAGE_TIP = 6;
+
+export const SALVAGE = {
+  TTL: 20, // s a salvage zone lasts
+} as const;
+
+export const QUICK = {
+  COOLDOWN: 1.5, // s between two quick-chat messages of one player (server enforced, client throttled the same)
+  CLAIM_TTL: 15, // s a "这单我来" claim stays on the order card
+  BUBBLE_MS: 2500, // speech bubble above the sender
+  HOLD_MS: 350, // hold the horn this long to open the wheel
+  CHATTER_MIN: 5, // quick-chat messages needed for the 话痨骑手 award
+  SELECT_MS: 8000, // a tapped order card counts as "my order" for a claim this long
 } as const;
 
 export const ORDERS = {
@@ -214,14 +234,16 @@ export const CARGO_VIEW = {
   WOBBLE_GAIN: 1.6, // exaggeration of the tower offset / tilt, soup surface tilt and scoop sway
 } as const;
 
-// ---------- Audio (DESIGN §13.2) ----------
+// ---------- Audio (DESIGN §13.2, §14.2) ----------
 // Pre-limiter peak amplitudes (0..1) of every sound. The horn is the loudest "voice"; the engine tops out at ~30% of it.
+// v0.3: the whole mix is louder so phone speakers can be heard (main sounds peak at 0.6-0.8 after the limiter).
 export const AUDIO = {
-  MASTER_GAIN: 0.8,
-  COMPRESSOR: { THRESHOLD: -14, KNEE: 6, RATIO: 8, ATTACK: 0.003, RELEASE: 0.15 }, // dB, dB, :1, s, s
+  MASTER_GAIN: 1.0,
+  DEFAULT_VOLUME: 0.8, // the player's volume slider (0..1) scales the master gain; this is its default
+  COMPRESSOR: { THRESHOLD: -12, KNEE: 8, RATIO: 6, ATTACK: 0.003, RELEASE: 0.15 }, // dB, dB, :1, s, s
   SOFTCLIP: { LINEAR_UNTIL: 0.8, CEILING: 0.97 }, // safety net after the compressor: the output can never reach 1.0
   ENGINE: {
-    MAX_VS_HORN: 0.24, // full-throttle engine gain as a fraction of HORN_PEAK: ~30% of the horn's RMS loudness (the putts have a high crest factor)
+    MAX_VS_HORN: 0.135, // full-throttle engine gain as a fraction of HORN_PEAK: ~30% of the horn's RMS loudness (the putts have a high crest factor)
     IDLE_VS_MAX: 0.18, // idling level as a fraction of the maximum
     IDLE_FADE_AFTER: 1.5, // s standing still without throttle before the engine fades to (almost) silence
     IDLE_FADE_TC: 0.45, // s, time constant of that fade
@@ -232,21 +254,38 @@ export const AUDIO = {
     CUTOFF_IDLE: 420, // Hz, low-pass cutoff
     CUTOFF_MAX: 1250,
     PULSE_DECAY: 5.5, // sharpness of one putt (larger = shorter)
+    HARMONIC_MIX: 2.0, // gain of the 300-1200 Hz harmonic layer (phone speakers cannot play the 84-150 Hz body) relative to the body
     WATCHDOG_MS: 400, // no setEngine() call for this long (frozen rAF, hidden window) -> fade the engine out
   },
-  HORN_PEAK: 0.3,
-  DOG_PEAK: 0.4,
-  CRASH_PEAK: 0.6,
-  SPLASH_BIG_PEAK: 0.55,
-  DRIP_PEAK: 0.16,
-  THUD_PEAK: 0.3,
-  CHIME_PEAK: 0.17,
-  PICKUP_PEAK: 0.22,
-  POP_PEAK: 0.22,
-  FAIL_PEAK: 0.18,
+  HORN_PEAK: 0.62,
+  DOG_PEAK: 0.8,
+  CRASH_PEAK: 1.9,
+  SPLASH_BIG_PEAK: 1.2,
+  DRIP_PEAK: 0.3,
+  THUD_PEAK: 0.7,
+  CHIME_PEAK: 0.62,
+  PING_PEAK: 0.62,
+  SALVAGE_PEAK: 0.56,
+  PICKUP_PEAK: 0.62,
+  POP_PEAK: 0.42,
+  FAIL_PEAK: 0.36,
   SPLASH_MIN_GAP_MS: 600, // never more than one splash per this long (the old 250 ms spam)
   DRIP_MIN_GAP_MS: 350,
   SPLASH_BIG_AMOUNT: 0.12, // soup spilled since the last sound (fraction of a bowl) that earns a real splash instead of a drip
+} as const;
+
+// ---------- Driving assists (DESIGN §14.1) ----------
+// They never change rewards. Auto-gas is on by default on touch; the in-zone auto-slow applies to everybody.
+export const ASSIST = {
+  CRUISE_THROTTLE: 0.7, // auto-gas: throttle value = target speed as a fraction of BIKE.VMAX (0.7 -> ~11 m/s)
+  ZONE_MARGIN: 3, // m: the auto-slow starts this far outside the circle edge (the door sits ~4 m off the road centre line, so a drive-by crosses only a ~6 m chord of the circle itself)
+  ZONE_TARGET_SPEED: 2.2, // m/s: brake until slower than this (pickup / delivery need < ZONE.MAX_SPEED)
+  ZONE_BRAKE: 0.5, // gentle brake: this fraction of BIKE.BRAKE (enough from the auto-gas cruise speed) ...
+  ZONE_BRAKE_MAX: 0.85, // ... harder only when the rider arrives fast with gas released (keyboard coasting in at 14 m/s)
+  REVERSE_HOLD: 0.6, // s: with auto-gas on, BRAKE must be held this long after the bike has stopped before it reverses
+  STOPPED_SPEED: 0.6, // m/s: below this the bike counts as stopped for that rule
+  STEADY_RACK_GAIN: 0.7, // "steadier rack": cargo wobble drive multiplier
+  HOLD_GAS_ABOVE: 0.05, // a throttle input above this counts as "the player is holding gas / boost"
 } as const;
 
 // ---------- Touch controls (DESIGN §13.3) ----------

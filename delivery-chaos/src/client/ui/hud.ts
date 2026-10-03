@@ -12,6 +12,11 @@ export interface OrdersContext {
   map: CityMap;
   myId: string;
   nameOf: (playerId: string) => string;
+  /** CSS colour of a rider (the claim chip wears it) */
+  colorOf: (playerId: string) => string;
+  /** the player tapped a waiting order card ("this one is mine" for the claim) */
+  onSelect?: (orderId: string) => void;
+  selectedId?: () => string | null;
 }
 
 export interface ScreenRect {
@@ -28,6 +33,8 @@ interface Card {
   el: HTMLElement;
   badge: HTMLElement;
   bar: HTMLElement;
+  claim: HTMLElement;
+  claimShown: boolean;
   order: Order;
 }
 
@@ -48,6 +55,9 @@ export class Hud {
   private readonly kmhEl: HTMLElement;
   private readonly kmh2El: HTMLElement;
   private readonly muteEl: HTMLElement;
+  private readonly gearEl: HTMLElement;
+  private readonly hintEl: HTMLElement;
+  private chatKeys = false;
   private readonly keysEl: HTMLElement;
   private readonly resetFill: HTMLElement;
   private readonly arrowEl: HTMLElement;
@@ -76,6 +86,8 @@ export class Hud {
         <div class="hud-spd"><span class="kmh" data-k="kmh2">0</span> <span data-t="hud.kmh"></span></div>
       </div>
       <div class="hud-mute" data-k="mute" role="button" tabindex="-1"></div>
+      <div class="hud-gear" data-k="gear" role="button" tabindex="-1">⚙</div>
+      <div class="hint" data-k="hint" hidden></div>
       <div class="hud-orders" data-k="orders"></div>
       <div class="hud-cargo panel">
         <div class="cargo-label"><img data-k="cicon" alt="" hidden /><span data-k="clabel"></span></div>
@@ -111,6 +123,8 @@ export class Hud {
     this.kmhEl = q('kmh');
     this.kmh2El = q('kmh2');
     this.muteEl = q('mute');
+    this.gearEl = q('gear');
+    this.hintEl = q('hint');
     this.keysEl = q('keys');
     this.resetFill = q('reset');
     this.arrowEl = q('arrow');
@@ -143,7 +157,10 @@ export class Hud {
     this.root.querySelectorAll<HTMLElement>('[data-t]').forEach((n) => {
       n.textContent = t(n.dataset.t as Parameters<typeof t>[0]);
     });
-    this.keysEl.innerHTML = `<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> ${t('hud.keys.ride')} · <kbd>${t('hud.keys.space')}</kbd> ${t('hud.keys.handbrake')} · <kbd>H</kbd> ${t('hud.keys.horn')} · <kbd>R</kbd> ${t('hud.keys.reset')}`;
+    this.keysEl.innerHTML =
+      `<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> ${t('hud.keys.ride')} · <kbd>${t('hud.keys.space')}</kbd> ${t('hud.keys.handbrake')} · <kbd>H</kbd> ${t('hud.keys.horn')} · <kbd>R</kbd> ${t('hud.keys.reset')}` +
+      (this.chatKeys ? ` · <kbd>1</kbd>-<kbd>6</kbd> ${t('hud.keys.chat')}` : '');
+    this.gearEl.setAttribute('aria-label', t('settings.open'));
     this.last.delete('clabel');
   }
 
@@ -157,6 +174,24 @@ export class Hud {
     this.muteEl.addEventListener('click', onToggle);
   }
 
+  /** the settings gear in the top-right corner */
+  setSettingsHandler(onOpen: () => void): void {
+    this.gearEl.addEventListener('click', onOpen);
+  }
+
+  /** show the "1-6 quick chat" key hint (online rooms only) */
+  setChatKeys(on: boolean): void {
+    if (on === this.chatKeys) return;
+    this.chatKeys = on;
+    this.applyLang();
+  }
+
+  /** first-session hint bubble (null hides it) */
+  setHint(text: string | null): void {
+    this.hintEl.hidden = text === null;
+    if (text !== null) this.hintEl.textContent = text;
+  }
+
   setMuted(m: boolean): void {
     this.muteEl.textContent = m ? '🔇' : '🔊';
     this.muteEl.setAttribute('aria-label', t(m ? 'sound.unmute' : 'sound.mute'));
@@ -166,7 +201,7 @@ export class Hud {
   /** on-screen rectangles of the HUD panels (the target arrow avoids them) */
   rects(): ScreenRect[] {
     const out: ScreenRect[] = [];
-    for (const sel of ['.hud-tl', '.hud-orders', '.hud-cargo', '.hud-bl', '.hud-mm', '.hud-mute']) {
+    for (const sel of ['.hud-tl', '.hud-orders', '.hud-cargo', '.hud-bl', '.hud-mm', '.hud-mute', '.hud-gear', '.hint']) {
       const e = this.root.querySelector<HTMLElement>(sel);
       if (!e) continue;
       const r = e.getBoundingClientRect();
@@ -191,6 +226,7 @@ export class Hud {
     this.root.hidden = !v;
     if (!v) {
       this.popups.clear();
+      this.hintEl.hidden = true;
       this.cards.forEach((c) => c.el.remove());
       this.cards.clear();
       this.last.clear();
@@ -221,9 +257,10 @@ export class Hud {
     // what you need to see first: your own order, then who is carrying what, then what is still up for grabs
     const rank = (o: Order) => {
       if (o.status === 'carrying' && o.carrierId === ctx.myId) return 0;
-      if (o.status === 'carrying') return 1;
-      if (o.status === 'waiting') return 2;
-      return 3;
+      if (o.status === 'waiting' && o.claimedBy) return 1; // a teammate said "这单我来": keep it in sight (small screens show only 2 cards)
+      if (o.status === 'carrying') return 2;
+      if (o.status === 'waiting') return 3;
+      return 4;
     };
     const sorted = [...list].sort((a, b) => rank(a) - rank(b) || a.createdAt - b.createdAt);
     const seen = new Set<string>();
@@ -293,8 +330,14 @@ export class Hud {
           <div class="order-meta"><small>${esc(t(`food.${o.food}`))}${size}${o.request === 'backDoor' ? ' · ' + esc(t('order.backDoor')) : ''}</small><span class="order-badge"></span></div>
         </div>
       </div>${req}
+      <div class="order-claim" hidden></div>
       <div class="order-bar"><i></i></div>`;
-    return { el, badge: el.querySelector('.order-badge')!, bar: el.querySelector('.order-bar > i')!, order: o };
+    el.addEventListener('pointerdown', (e) => {
+      if (this.cards.get(o.id)?.order.status !== 'waiting') return;
+      e.stopPropagation();
+      this.ctx?.onSelect?.(o.id);
+    });
+    return { el, badge: el.querySelector('.order-badge')!, bar: el.querySelector('.order-bar > i')!, claim: el.querySelector('.order-claim')!, claimShown: false, order: o };
   }
 
   private paintCard(c: Card, ctx: OrdersContext): void {
@@ -304,14 +347,31 @@ export class Hud {
     c.el.classList.toggle('taken', o.status === 'carrying' && !mine);
     c.el.classList.toggle('ended', o.status === 'expired' || o.status === 'delivered');
     c.badge.className = `order-badge ${o.status === 'waiting' ? 'wait' : mine ? 'mine' : 'other'}`;
+    c.el.classList.toggle('pick', o.status === 'waiting');
   }
 
   /** per-frame (throttled by caller): countdown bars + badge text */
   updateOrderBars(serverNow: number): void {
     const ctx = this.ctx;
     if (!ctx) return;
+    let layoutChanged = false;
+    const selected = ctx.selectedId?.() ?? null;
     for (const c of this.cards.values()) {
       const o = c.order;
+      c.el.classList.toggle('sel', o.status === 'waiting' && o.id === selected);
+      // "🙋 <rider> has this": informational, shown while the claim is alive (the server also clears it on pickup / expiry)
+      const claimed = o.status === 'waiting' && !!o.claimedBy && o.claimUntil !== null && serverNow < o.claimUntil;
+      if (claimed) {
+        const text = `🙋 ${t('ping.claimBy', { who: ctx.nameOf(o.claimedBy!) })}`;
+        if (c.claim.textContent !== text) c.claim.textContent = text;
+        c.claim.style.setProperty('--pc', ctx.colorOf(o.claimedBy!));
+        c.claim.dataset.by = o.claimedBy!;
+      }
+      if (claimed !== c.claimShown) {
+        c.claimShown = claimed;
+        c.claim.hidden = !claimed;
+        layoutChanged = true;
+      }
       let frac = 1;
       let cls = '';
       let badge = '';
@@ -338,6 +398,7 @@ export class Hud {
       if (c.bar.className !== cls) c.bar.className = cls;
       if (c.badge.textContent !== badge) c.badge.textContent = badge;
     }
+    if (layoutChanged) this.fitCards(this.lastOrder);
   }
 
   // ---------------------------------------------------------------- cargo / speed
@@ -379,7 +440,20 @@ export class Hud {
     this.arrowEl.style.transform = `translate(${a.x.toFixed(0)}px, ${a.y.toFixed(0)}px) rotate(${a.angle.toFixed(3)}rad)`;
     this.arrowEl.style.setProperty('--arrow', a.color);
     const d = this.arrowDist;
-    d.style.transform = `translateX(-50%) rotate(${(-a.angle).toFixed(3)}rad)`;
+    // The label sits on the far side of the arrow (towards the screen centre). When the arrow was nudged along the border
+    // away from the target's direction (to dodge a panel / the hint) that side can point off screen: shift the label back in.
+    const th = a.angle;
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    const cx = a.x - 50 * Math.sin(th);
+    const cy = a.y + 50 * Math.cos(th);
+    const padX = 26;
+    const padY = 14;
+    const sx = Math.min(0, Math.max(-1e4, W - padX - cx)) + Math.max(0, padX - cx);
+    const sy = Math.min(0, Math.max(-1e4, H - padY - cy)) + Math.max(0, padY - cy);
+    const lx = sx * Math.cos(th) + sy * Math.sin(th);
+    const ly = -sx * Math.sin(th) + sy * Math.cos(th);
+    d.style.transform = `translate(calc(-50% + ${lx.toFixed(1)}px), ${ly.toFixed(1)}px) rotate(${(-th).toFixed(3)}rad)`;
     this.setText('adist', d, `${Math.round(a.dist)}m`);
   }
 

@@ -159,6 +159,8 @@ export class World {
   readonly sun: THREE.DirectionalLight;
   readonly restaurantMarkers: TargetMarker[] = [];
   readonly customerMarker: TargetMarker;
+  /** soft vertical fade used by the light pillars (also for the salvage-zone beacons) */
+  readonly markerAlpha: THREE.Texture;
   private readonly backDoorTags: Map<string, LabelSprite> = new Map();
   private readonly disposers: (() => void)[] = [];
   private readonly fading: { sprite: THREE.Sprite; near: number }[] = [];
@@ -196,6 +198,7 @@ export class World {
     this.buildLandmarks();
 
     const alpha = gradientAlphaTexture();
+    this.markerAlpha = alpha;
     this.disposers.push(() => alpha.dispose());
     for (const r of map.restaurants) {
       const m = new TargetMarker(r.color, alpha);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AUDIO } from '../src/shared/constants';
-import { ENGINE_MAX_LEVEL, Throttle, engineTargets, isIdling, puttWave, softClipCurve, spillSound } from '../src/client/audioLogic';
+import { ENGINE_MAX_LEVEL, Throttle, engineTargets, isIdling, pingNotes, puttWave, softClipCurve, spillSound } from '../src/client/audioLogic';
+import { PING_IDS } from '../src/shared/pings';
 
 describe('engine (putt-putt)', () => {
   it('is far quieter than the horn: full throttle gain <= 30% of the horn peak', () => {
@@ -63,8 +64,8 @@ describe('soup spill sounds (A4)', () => {
 });
 
 describe('master bus', () => {
-  it('compressor settings follow the spec', () => {
-    expect(AUDIO.COMPRESSOR).toMatchObject({ THRESHOLD: -14, RATIO: 8, ATTACK: 0.003, RELEASE: 0.15 });
+  it('compressor settings follow the spec (v0.3 retune: -12 dB / 6:1 so the louder mix is not flattened to the old ceiling)', () => {
+    expect(AUDIO.COMPRESSOR).toMatchObject({ THRESHOLD: -12, RATIO: 6, ATTACK: 0.003, RELEASE: 0.15 });
   });
 
   it('the soft clipper is transparent below the knee and never reaches full scale', () => {
@@ -85,5 +86,23 @@ describe('master bus', () => {
     expect(real.length).toBe(33);
     expect(Math.hypot(real[1]!, imag[1]!)).toBeGreaterThan(0.2);
     expect(real[0]).toBe(0);
+  });
+});
+
+describe('quick-chat sounds', () => {
+  it('every preset has its own short phrase', () => {
+    const sigs = PING_IDS.map((id) => {
+      const { type, notes } = pingNotes(id);
+      expect(notes.length).toBeGreaterThan(1);
+      const end = Math.max(...notes.map((n) => n.at + n.dur));
+      expect(end).toBeLessThan(0.6); // short
+      return `${type}:${notes.map((n) => `${n.f}@${n.at}`).join(',')}`;
+    });
+    expect(new Set(sigs).size).toBe(PING_IDS.length);
+  });
+  it('the mix is louder than v0.2 and the volume slider scales from a sensible default', () => {
+    expect(AUDIO.DEFAULT_VOLUME).toBeGreaterThan(0);
+    expect(AUDIO.DEFAULT_VOLUME).toBeLessThan(1);
+    expect(AUDIO.HORN_PEAK).toBeGreaterThan(0.3);
   });
 });

@@ -207,7 +207,9 @@ export class BikeController {
         else vF = Math.max(-BIKE.REVERSE_MAX, vF - BIKE.ACCEL * brake * dt);
       } else if (throttle > 0.01) {
         const target = BIKE.VMAX * throttle;
-        if (vF < 0) vF = Math.min(0, vF + BIKE.BRAKE * dt); // stop reversing first
+        // stop reversing first. (-0.05: a bike at rest carries a ~1e-17 m/s solver residue whose sign depends on the heading;
+        // read as "reversing" it pinned the bike at 0 forever when facing north. Found while testing v0.3's auto-stop.)
+        if (vF < -0.05) vF = Math.min(0, vF + BIKE.BRAKE * dt);
         else if (vF < target) vF = Math.min(target, vF + BIKE.ACCEL * dt);
         else vF = Math.max(target, vF - BIKE.COAST_DECEL * dt);
       } else {

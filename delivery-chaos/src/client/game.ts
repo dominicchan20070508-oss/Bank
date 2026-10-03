@@ -2,21 +2,28 @@
 // cargo models, the world, the HUD and the transport. Game RULES (orders, tips, timers) live in shared/rules.ts and
 // are only *reported to* / *received from* the transport here.
 import * as THREE from 'three';
-import { AUDIO, BIKE, CARGO, GAME, PLAYER_COLORS, TOUCH, VIEW, ZONE } from '../shared/constants';
+import { ASSIST, AUDIO, BIKE, CARGO, GAME, PLAYER_COLORS, QUICK, TOUCH, VIEW, ZONE } from '../shared/constants';
 import { doorOf, generateCity, type CityMap, type Door } from '../shared/map';
 import { REQUEST_INFO, targetDoor, type Order } from '../shared/orders';
-import type { GameEvent, RejectReason, ResultsMsg, RoomPlayerInfo, ServerMsg, StatKey } from '../shared/protocol';
+import { PING_ICONS, type PingId } from '../shared/pings';
+import type { GameEvent, RejectReason, ResultsMsg, RoomPlayerInfo, SalvageZoneInfo, ServerMsg, StatKey } from '../shared/protocol';
 import { createCargo, type Cargo, type CargoEvent } from '../sim/cargo';
-import { BikeController, type BikeEvent } from './bike';
+import { applyAssist, newAssistState, steadyDrive } from './assist';
+import { BikeController, NO_INPUT, type BikeEvent, type BikeInput } from './bike';
 import { BikeModel } from './bikeModel';
 import type { Sfx } from './audio';
 import { ChaseCamera } from './camera';
 import { CargoView } from './cargoView';
 import { DebrisManager } from './debris';
+import type { HintManager } from './hints';
 import type { Input, InputOverride } from './input';
-import { Minimap, type MinimapMarker } from './minimap';
+import { Minimap, type MinimapMarker, type MinimapPlayer } from './minimap';
 import type { Transport } from './net/transport';
 import { Particles } from './particles';
+import { QuickGate } from './quickWheel';
+import { SALVAGE_COLOR, SalvageView } from './salvageView';
+import type { Settings } from './settings';
+import type { EdgeCues, EdgeResult } from './ui/cues';
 import { RemoteBike } from './remoteBike';
 import { createPhysics, FIXED_DT, type PhysicsWorld } from './physics';
 import { formatCargoStatus, formatQuote, formatTipParts, placeName, playerName, t } from './i18n';
@@ -36,6 +43,12 @@ export interface GameDeps {
   touch?: TouchControls | null;
   /** phone performance profile: fewer particles */
   lowPower?: boolean;
+  /** device settings: auto-gas, steadier rack, mute teammates' quick chat */
+  settings: Settings;
+  /** first-session hints (the game only says WHEN; the app draws them) */
+  hints: HintManager;
+  /** off-screen direction cues (teammate honks / calls, salvage zones) */
+  cues: EdgeCues;
   /** shadows are skipped on software GL (headless / no GPU) because they more than halve the frame rate; ?shadows forces them on */
   forceShadows?: boolean;
 }
@@ -55,11 +68,10 @@ interface Carrying {
   crashedDuring: boolean;
 }
 
-interface ZoneTarget {
-  kind: 'pickup' | 'deliver';
-  order: Order;
-  door: Door;
-}
+type ZoneTarget =
+  | { kind: 'pickup' | 'deliver'; order: Order; door: Door; assist: true }
+  /** a teammate's salvage zone; `assist` is false while you carry an order (passing through must never stop you) */
+  | { kind: 'salvage'; zone: SalvageZoneInfo; assist: boolean };
 
 const REJECT_KEYS: Partial<Record<RejectReason, 'reject.taken' | 'reject.busy' | 'reject.far' | 'reject.fast'>> = {
   taken: 'reject.taken',
@@ -103,7 +115,7 @@ export class Game {
 
   private dwell = 0;
   private zone: ZoneTarget | null = null;
-  private pending: { orderId: string; kind: 'pickup' | 'deliver'; until: number } | null = null;
+  private pending: { orderId: string; kind: 'pickup' | 'deliver' | 'salvage'; until: number } | null = null;
   private wrongDwell = 0;
   private wrongHintAt = -99;
 
@@ -125,6 +137,21 @@ export class Game {
   private lowFpsSeconds = 0;
   private pixelRatio: number;
   private readonly softwareGL: boolean;
+
+  // ---- v0.3: co-op
+  private salvageZones: SalvageZoneInfo[] = [];
+  private readonly salvageViews = new Map<string, SalvageView>();
+  private selected: { id: string; until: number } | null = null;
+  private readonly quickGate = new QuickGate();
+  private readonly pingFlash = new Map<string, number>(); // playerId -> performance.now() of the last call-out
+  private readonly honkCaptionAt = new Map<string, number>();
+  /** QA: the last quick-chat messages as shown to this player */
+  readonly pingLog: { playerId: string; pingId: PingId; text: string; orderId?: string }[] = [];
+  // ---- v0.3: driving assists
+  private readonly assistState = newAssistState();
+  private applied: BikeInput = NO_INPUT;
+  private assistInZone = false;
+  private readonly steadyScratch = { x: 0, y: 0, z: 0 };
 
   private readonly tmpV = new THREE.Vector3();
   private readonly tmpV2 = new THREE.Vector3();
@@ -169,6 +196,9 @@ export class Game {
     window.addEventListener('resize', this.onResize);
     this.sendState();
     deps.hud.popups.floatText(t('float.go'), { color: '#ffe08a', size: 'big', jitter: 0 });
+    deps.hud.setChatKeys(this.roster.size > 1);
+    deps.hints.clear();
+    deps.hints.request('start');
   }
 
   // ------------------------------------------------------------------ lifecycle
@@ -191,6 +221,10 @@ export class Game {
     this.deps.sfx.setEngine(0, 0, false);
     this.remotes.forEach((r) => r.dispose());
     this.remotes.clear();
+    this.salvageViews.forEach((v) => v.dispose());
+    this.salvageViews.clear();
+    this.deps.cues.clear();
+    this.deps.hints.clear();
     this.debris.dispose();
     this.particles.dispose();
     this.bikeModel.dispose();
@@ -216,6 +250,9 @@ export class Game {
     this.deps.sfx.setEngine(0, 0, false);
     this.carrying = null;
     this.cargoView.clear();
+    this.deps.hints.clear();
+    this.deps.cues.clear();
+    this.setSalvageZones([]);
   }
 
   resize(): void {
@@ -281,12 +318,20 @@ export class Game {
             this.remotes.delete(id);
           }
         }
+        this.deps.hud.setChatKeys(this.roster.size > 1);
         break;
       case 'orders':
         this.orders = msg.list;
         this.teamTips = msg.teamTips;
         this.pending = null;
-        this.deps.hud.setOrders(this.orders, { map: this.map, myId: this.me, nameOf: (id) => this.nameOf(id) });
+        this.deps.hud.setOrders(this.orders, {
+          map: this.map,
+          myId: this.me,
+          nameOf: (id) => this.nameOf(id),
+          colorOf: (id) => hex(PLAYER_COLORS[this.roster.get(id)?.color ?? 0] ?? 0xffffff),
+          onSelect: (id) => this.selectOrder(id),
+          selectedId: () => this.selectedOrderId(),
+        });
         this.deps.hud.setTips(this.teamTips, Math.max(1, this.roster.size));
         // our carried order vanished from under us (e.g. server side expiry)?
         if (this.carrying) {
@@ -307,6 +352,10 @@ export class Game {
           const carried = this.orders.find((o) => o.carrierId === id && o.status === 'carrying');
           r.push(s, carried?.size ?? 0);
         }
+        break;
+      case 'salvage':
+        this.pending = this.pending?.kind === 'salvage' ? null : this.pending;
+        this.setSalvageZones(msg.list);
         break;
       case 'event':
         this.handleEvent(msg);
@@ -364,6 +413,7 @@ export class Game {
           const dz = ev.p[2] - this.bike.pos.z;
           const dist = Math.hypot(dx, dz);
           this.deps.sfx.horn(Number.isFinite(dist) ? Math.max(0.12, 1 - dist / 90) : 0.3); // quieter the farther away
+          this.captionHonk(ev.playerId);
         }
         if (ev.dog) {
           const o = this.orders.find((x) => x.id === ev.orderId);
@@ -375,6 +425,12 @@ export class Game {
         }
         break;
       }
+      case 'ping':
+        this.onPing(ev);
+        break;
+      case 'salvage':
+        this.onSalvageEvent(ev);
+        break;
       case 'reject': {
         this.pending = null;
         this.dwell = 0;
@@ -403,6 +459,115 @@ export class Game {
       default:
         break;
     }
+  }
+
+  // ------------------------------------------------------------------ v0.3: quick chat, captions, salvage
+  private colorOfId(id: string): number {
+    return PLAYER_COLORS[this.roster.get(id)?.color ?? 0] ?? 0xffffff;
+  }
+
+  /** where a rider's head is, for bubbles and cues (null until a teammate's first snapshot) */
+  private headOf(id: string): [number, number, number] | null {
+    if (id === this.me) return this.above(2.9);
+    const p = this.remotes.get(id)?.positionAt(this.now());
+    return p ? [p[0], p[1] + 2.9, p[2]] : null;
+  }
+
+  /** "📯 Beep beep!" over a teammate's head, and an arrow on the screen edge when they are out of sight */
+  private captionHonk(id: string): void {
+    const nowMs = performance.now();
+    if (nowMs - (this.honkCaptionAt.get(id) ?? -1e9) < 900) return;
+    this.honkCaptionAt.set(id, nowMs);
+    const color = hex(this.colorOfId(id));
+    this.deps.hud.popups.followBubble(`honk:${id}`, t('float.honkOther'), this.nameOf(id), () => this.headOf(id), 1300, { cls: 'honk', color });
+    this.deps.cues.add(`honk:${id}`, '📯', color, () => this.headOf(id), 1500);
+  }
+
+  private onPing(ev: Extract<GameEvent, { ev: 'ping' }>): void {
+    const mine = ev.playerId === this.me;
+    if (!mine && this.deps.settings.muteChat) return; // "mute teammates' quick chat"
+    const text = t(`ping.${ev.pingId}`);
+    const icon = PING_ICONS[ev.pingId];
+    const color = hex(this.colorOfId(ev.playerId));
+    this.pingLog.push({ playerId: ev.playerId, pingId: ev.pingId, text, orderId: ev.orderId });
+    if (this.pingLog.length > 40) this.pingLog.shift();
+    this.deps.hud.popups.followBubble(`ping:${ev.playerId}`, `${icon} ${text}`, mine ? '' : this.nameOf(ev.playerId), () => this.headOf(ev.playerId), QUICK.BUBBLE_MS, { cls: 'ping', color });
+    this.pingFlash.set(ev.playerId, performance.now());
+    if (!mine) this.deps.cues.add(`ping:${ev.playerId}`, icon, color, () => this.headOf(ev.playerId), QUICK.BUBBLE_MS);
+    let vol = 1;
+    const head = mine ? null : this.headOf(ev.playerId);
+    if (head) vol = Math.max(0.3, 1 - Math.hypot(head[0] - this.bike.pos.x, head[2] - this.bike.pos.z) / 140);
+    this.deps.sfx.ping(ev.pingId, vol);
+  }
+
+  private onSalvageEvent(ev: Extract<GameEvent, { ev: 'salvage' }>): void {
+    const zone = this.salvageZones.find((z) => z.id === ev.zoneId);
+    this.teamTips = ev.teamTips;
+    this.deps.hud.setTips(this.teamTips, Math.max(1, this.roster.size));
+    this.setSalvageZones(this.salvageZones.filter((z) => z.id !== ev.zoneId));
+    const head = this.headOf(ev.playerId) ?? (zone ? ([zone.x, 3, zone.z] as [number, number, number]) : this.above(3));
+    this.deps.hud.popups.floatText(t('salvage.float', { n: ev.tip }), { world: head, color: '#7dff9b', size: 'normal', jitter: 10 });
+    this.deps.sfx.salvage();
+    if (zone) this.particles.burst(zone.x, 1.5, zone.z, 22, SALVAGE_COLOR, { spread: 4.5, dir: [0, 5, 0], life: 1.1, gravity: 8 });
+    if (ev.ownerId === this.me && ev.playerId !== this.me) this.deps.hud.popups.toast(t('salvage.thanks', { who: this.nameOf(ev.playerId) }));
+  }
+
+  /** The server's list of open salvage zones changed: add / remove the beacons, cues and (for others' zones) the hint. */
+  private setSalvageZones(list: SalvageZoneInfo[]): void {
+    const ids = new Set(list.map((z) => z.id));
+    for (const [id, v] of this.salvageViews) {
+      if (!ids.has(id)) {
+        v.dispose();
+        this.salvageViews.delete(id);
+        this.deps.cues.remove(`salvage:${id}`);
+      }
+    }
+    for (const z of list) {
+      if (this.salvageViews.has(z.id)) continue;
+      this.salvageViews.set(z.id, new SalvageView(this.world.scene, this.world.markerAlpha, z.id, z.x, z.z, z.food, z.expiresAt));
+      if (z.ownerId !== this.me) {
+        this.deps.cues.add(`salvage:${z.id}`, '🆘', hex(SALVAGE_COLOR), () => [z.x, 3, z.z], Infinity);
+        this.deps.hints.request('salvage');
+      }
+    }
+    this.salvageZones = list;
+  }
+
+  /** the player tapped a waiting order card: a following "这单我来" claims exactly this one */
+  selectOrder(id: string): void {
+    this.selected = { id, until: performance.now() + QUICK.SELECT_MS };
+  }
+
+  private selectedOrderId(): string | null {
+    const s = this.selected;
+    if (!s || performance.now() > s.until) return null;
+    const o = this.orders.find((x) => x.id === s.id);
+    return o && o.status === 'waiting' ? s.id : null;
+  }
+
+  /** a quick-chat wheel is available: online with at least one teammate, mid-round */
+  quickEnabled(): boolean {
+    return this.phase === 'playing' && !this.frozen && !this.disposed && this.roster.size > 1;
+  }
+
+  /** Send a quick-chat preset. The text, bubble and sound come back from the server for everybody (including us). */
+  sendQuick(id: PingId): boolean {
+    if (!this.quickEnabled()) return false;
+    let orderId: string | undefined;
+    if (id === 'claim') {
+      if (this.carrying) {
+        this.deps.hud.popups.toast(t('reject.busy'));
+        return false;
+      }
+      if (!this.orders.some((o) => o.status === 'waiting')) {
+        this.deps.hud.popups.toast(t('ping.noClaim'));
+        return false;
+      }
+      orderId = this.selectedOrderId() ?? undefined;
+    }
+    if (!this.quickGate.take(performance.now())) return false;
+    this.send({ type: 'quick', id, orderId });
+    return true;
   }
 
   /** world position a bit above the local bike, for popups */
@@ -470,8 +635,17 @@ export class Game {
     if (input.consumeHonk()) this.honk();
 
     const bike = this.bike;
+    // driving assists (DESIGN §14.1): auto-gas, the gentle auto-slow in target circles; debug overrides are exact
+    const raw = input.read();
+    const az = this.findZone(ASSIST.ZONE_MARGIN);
+    this.assistInZone = !!az && az.assist;
+    const zc = az ? (az.kind === 'salvage' ? { x: az.zone.x, z: az.zone.z } : { x: az.door.x, z: az.door.z }) : null;
+    this.applied =
+      input.enabled && !input.hasOverride
+        ? applyAssist(this.assistState, raw, { autoGas: this.autoGasOn(), speedFwd: bike.speedFwd, inZone: this.assistInZone, zoneDist: zc ? Math.hypot(zc.x - bike.pos.x, zc.z - bike.pos.z) : undefined, crashed: bike.crashed, dt })
+        : raw;
     bike.syncPrev();
-    bike.preStep(dt, input.read());
+    bike.preStep(dt, this.applied);
     this.phys.world.step(dt);
     bike.postStep(dt);
 
@@ -479,7 +653,8 @@ export class Game {
 
     const c = this.carrying;
     if (c) {
-      const events = c.cargo.update(dt, bike.aLocal, bike.lean, bike.speed);
+      const drive = steadyDrive(bike.aLocal, bike.lean, this.deps.settings.steadyRack, this.steadyScratch);
+      const events = c.cargo.update(dt, drive.a, drive.lean, bike.speed);
       for (const e of events) this.onCargoEvent(e, false);
     }
 
@@ -496,6 +671,11 @@ export class Game {
       this.statSoup = 0;
       this.statFlushAt = this.time;
     }
+  }
+
+  /** auto-gas: the player's setting (on by default for touch controls); only meaningful while the touch controls exist */
+  private autoGasOn(): boolean {
+    return this.deps.settings.autoGas(!!this.deps.touch);
   }
 
   private honk(): void {
@@ -521,6 +701,7 @@ export class Game {
         hud.popups.flash();
         this.chase.addShake(VIEW.SHAKE_CRASH);
         this.deps.sfx.crash();
+        this.deps.hints.request('crash');
         this.particles.burst(p.x, 0.8, p.z, 26, 0xffe08a, { spread: 5, dir: [0, 2, 0], life: 0.9 });
         this.particles.burst(p.x, 0.6, p.z, 16, 0xcfc7b6, { spread: 3, life: 1.1, gravity: 2 });
         this.stat('crashes', 1);
@@ -642,22 +823,36 @@ export class Game {
   }
 
   // ------------------------------------------------------------------ pickup / delivery zones
-  private findZone(): ZoneTarget | null {
+  /** The circle the bike could stop in right now (pickup / delivery / a teammate's salvage zone). `extra` widens it (auto-slow margin). */
+  private findZone(extra = 0): ZoneTarget | null {
     const px = this.bike.pos.x;
     const pz = this.bike.pos.z;
-    const R2 = ZONE.RADIUS * ZONE.RADIUS;
+    const R = ZONE.RADIUS + extra;
+    const R2 = R * R;
     if (this.carrying) {
       const o = this.carrying.order;
       const d = targetDoor(this.map, o);
-      return d2(px, pz, d.x, d.z) <= R2 ? { kind: 'deliver', order: o, door: d } : null;
+      if (d2(px, pz, d.x, d.z) <= R2) return { kind: 'deliver', order: o, door: d, assist: true };
+    } else {
+      let best: ZoneTarget | null = null;
+      let bestAt = Infinity;
+      for (const o of this.orders) {
+        if (o.status !== 'waiting') continue;
+        const d = this.restaurantDoors.get(o.restaurantId)!;
+        if (d2(px, pz, d.x, d.z) <= R2 && o.createdAt < bestAt) {
+          best = { kind: 'pickup', order: o, door: d, assist: true };
+          bestAt = o.createdAt;
+        }
+      }
+      if (best) return best;
     }
-    let best: ZoneTarget | null = null;
-    for (const o of this.orders) {
-      if (o.status !== 'waiting') continue;
-      const d = this.restaurantDoors.get(o.restaurantId)!;
-      if (d2(px, pz, d.x, d.z) <= R2 && (!best || o.createdAt < best.order.createdAt)) best = { kind: 'pickup', order: o, door: d };
+    // a teammate's salvage zone (never your own)
+    const now = this.now();
+    for (const z of this.salvageZones) {
+      if (z.ownerId === this.me || z.expiresAt <= now) continue;
+      if (d2(px, pz, z.x, z.z) <= R2) return { kind: 'salvage', zone: z, assist: !this.carrying };
     }
-    return best;
+    return null;
   }
 
   private updateZone(dt: number): void {
@@ -670,11 +865,16 @@ export class Game {
 
     if (this.pending && this.time > this.pending.until) this.pending = null;
     if (z && this.dwell >= ZONE.DWELL && !this.pending) {
-      this.pending = { orderId: z.order.id, kind: z.kind, until: this.time + 1.2 };
-      if (z.kind === 'pickup') this.send({ type: 'pickup', orderId: z.order.id });
-      else {
-        const c = this.carrying!;
-        this.send({ type: 'deliver', orderId: z.order.id, integrity: c.cargo.integrity, crashedDuring: c.crashedDuring, honkedNear: c.honkedNear });
+      if (z.kind === 'salvage') {
+        this.pending = { orderId: z.zone.id, kind: 'salvage', until: this.time + 1.2 };
+        this.send({ type: 'salvage', zoneId: z.zone.id });
+      } else {
+        this.pending = { orderId: z.order.id, kind: z.kind, until: this.time + 1.2 };
+        if (z.kind === 'pickup') this.send({ type: 'pickup', orderId: z.order.id });
+        else {
+          const c = this.carrying!;
+          this.send({ type: 'deliver', orderId: z.order.id, integrity: c.cargo.integrity, crashedDuring: c.crashedDuring, honkedNear: c.honkedNear });
+        }
       }
     }
 
@@ -753,6 +953,7 @@ export class Game {
     }
 
     for (const r of this.remotes.values()) r.update(dt, this.now(), this.chase.camera.position);
+    for (const v of this.salvageViews.values()) v.update(this.now(), this.time);
     this.debris.update(dt);
     this.particles.update(dt);
     this.chase.update(dt, it.x, it.y - BIKE.RADIUS, it.z, it.heading, bike.speed, this.map);
@@ -761,6 +962,8 @@ export class Game {
 
     this.updateGuidance(hud);
     hud.popups.update();
+    this.deps.cues.update((w) => this.screenEdge(w[0], w[1], w[2]), (x, y) => this.avoidPanels(x, y));
+    this.updateHints();
 
     // HUD text (cheap)
     hud.setTime(this.timeLeft());
@@ -776,17 +979,22 @@ export class Game {
     }
 
     // minimap
-    const players = [{ x: it.x, z: it.z, heading: it.heading, color: this.bikeModel.color, me: true }];
-    for (const r of this.remotes.values()) players.push({ x: r.pos[0], z: r.pos[2], heading: r.heading, color: PLAYER_COLORS[r.info.color] ?? 0xffffff, me: false });
+    const flashOf = (id: string) => {
+      const at = this.pingFlash.get(id);
+      return at === undefined ? undefined : (performance.now() - at) / 900;
+    };
+    const players: MinimapPlayer[] = [{ x: it.x, z: it.z, heading: it.heading, color: this.bikeModel.color, me: true, flash: flashOf(this.me) }];
+    for (const r of this.remotes.values()) players.push({ x: r.pos[0], z: r.pos[2], heading: r.heading, color: PLAYER_COLORS[r.info.color] ?? 0xffffff, me: false, flash: flashOf(r.info.id) });
     const active = new Set<string>();
     if (!this.carrying) for (const o of this.orders) if (o.status === 'waiting') active.add(o.restaurantId);
     const targets: MinimapMarker[] = [];
     const pt = this.primaryTarget();
     if (pt) targets.push({ x: pt.door.x, z: pt.door.z, color: pt.kind === 'deliver' ? 0x1b1b1b : pt.color, pulse: true });
+    for (const z of this.salvageZones) targets.push({ x: z.x, z: z.z, color: SALVAGE_COLOR, pulse: true, salvage: true });
     this.minimap.draw(players, active, targets, this.time);
 
     // audio
-    deps.sfx.setEngine(bike.speed / BIKE.VMAX, playing && !bike.crashed ? deps.input.read().throttle : 0, playing && !bike.crashed);
+    deps.sfx.setEngine(bike.speed / BIKE.VMAX, playing && !bike.crashed ? this.applied.throttle : 0, playing && !bike.crashed);
 
     if (deps.debug) {
       hud.setDebug(
@@ -803,6 +1011,36 @@ export class Game {
     const cu = this.map.customers.find((x) => x.id === c.order.customerId)!;
     const req = c.order.request ? ` · ${REQUEST_INFO[c.order.request].icon} ${t(`req.${c.order.request}.short`)}` : '';
     return t('hud.hintDeliver', { dest: placeName(cu), req });
+  }
+
+  /** where a world point is on screen: inside, or the nearest spot on the screen edge pointing at it (behind the camera too) */
+  private screenEdge(wx: number, wy: number, wz: number): EdgeResult {
+    const cam = this.chase.camera;
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    const v = this.tmpV.set(wx, wy, wz);
+    const inView = v.clone().applyMatrix4(cam.matrixWorldInverse);
+    const ndc = v.clone().project(cam);
+    const onScreen = inView.z < 0 && Math.abs(ndc.x) < 0.92 && Math.abs(ndc.y) < 0.85;
+    let dx = inView.x;
+    let dy = -inView.y;
+    if (Math.abs(dx) < 1e-3 && Math.abs(dy) < 1e-3) dy = 1;
+    const m = isCompactScreen() ? 40 : 60;
+    const k = Math.min((W / 2 - m) / Math.max(1e-6, Math.abs(dx)), (H / 2 - m) / Math.max(1e-6, Math.abs(dy)));
+    return { onScreen, x: W / 2 + dx * k, y: H / 2 + dy * k, angle: Math.atan2(dx, -dy) };
+  }
+
+  private avoidPanels(x: number, y: number): [number, number] {
+    return avoidHud(x, y, window.innerWidth, window.innerHeight, isCompactScreen() ? 40 : 60, this.panelRects());
+  }
+
+  /** first-session hints: say WHEN something happens for the first time, the app draws them */
+  private updateHints(): void {
+    const h = this.deps.hints;
+    const pt = this.primaryTarget();
+    if (pt && this.phase === 'playing' && Math.hypot(pt.door.x - this.bike.pos.x, pt.door.z - this.bike.pos.z) < 26) h.request('approach');
+    if (this.carrying && this.carrying.cargo.integrity < 0.98) h.request('cargo');
+    h.update(performance.now());
   }
 
   /** HUD panels + touch buttons the target arrow must stay out of (re-measured a few times a second) */
@@ -862,7 +1100,7 @@ export class Game {
         x: p.x,
         y: p.y,
         progress: this.pending ? 1 : this.dwell / ZONE.DWELL,
-        label: this.pending ? '…' : slow ? t(this.zone.kind === 'pickup' ? 'zone.pickup' : 'zone.deliver') : t('zone.stop'),
+        label: this.pending ? '…' : slow ? t(this.zone.kind === 'pickup' ? 'zone.pickup' : this.zone.kind === 'salvage' ? 'zone.salvage' : 'zone.deliver') : t('zone.stop'),
       });
     } else hud.setZone(null);
   }
@@ -884,9 +1122,17 @@ export class Game {
       teamTips: this.teamTips,
       players,
       orders: this.orders,
-      bike: { pos: [b.pos.x, b.pos.y, b.pos.z] as [number, number, number], heading: b.heading, speed: b.speed, lean: b.lean, crashed: b.crashed, airborne: b.airborne },
+      bike: { pos: [b.pos.x, b.pos.y, b.pos.z] as [number, number, number], heading: b.heading, speed: b.speed, speedFwd: b.speedFwd, lean: b.lean, crashed: b.crashed, airborne: b.airborne },
       cargo: c ? { kind: c.cargo.kind, integrity: c.cargo.integrity, detail: formatCargoStatus(c.cargo.status), summary: c.cargo.summary() } : null,
       input: { ...this.deps.input.last },
+      /** what the bike really received after the driving assists (auto-gas, auto-slow) */
+      applied: { ...this.applied },
+      assist: { autoGas: this.autoGasOn(), inZone: this.assistInZone, steadyRack: this.deps.settings.steadyRack },
+      salvage: this.salvageZones.map((z) => ({ ...z })),
+      flash: Object.fromEntries([...this.pingFlash].map(([id, at]) => [id, (performance.now() - at) / 900])),
+      cues: this.deps.cues.count,
+      pings: this.pingLog.map((p) => ({ ...p })),
+      zone: this.zone ? { kind: this.zone.kind, dwell: this.dwell } : null,
       counters: { ...this.counters },
       fps: Math.round(this.fps),
     };
@@ -908,6 +1154,8 @@ export class Game {
       return d ? [d.x, d.z] : null;
     },
     honk: () => this.honk(),
+    /** send a quick-chat preset exactly like the wheel does */
+    quick: (id: PingId) => this.sendQuick(id),
     /** screen rectangles of the HUD panels and touch buttons (QA: nothing may overlap the buttons) */
     hudRects: () => ({ hud: this.deps.hud.rects(), touch: this.deps.touch?.rects() ?? [] }),
     /** static map summary for test scripts (positions in metres) */

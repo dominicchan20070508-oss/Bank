@@ -1,5 +1,6 @@
 // Input validation shared by GameRoom (which relays data to other clients) and the WebSocket server (which parses
 // raw JSON). Everything coming from a socket is untrusted: one bad client must never be able to hurt its teammates.
+import { isPingId } from './pings';
 import type { ClientMsg, CargoSummary, DebrisKind, StatKey, Vec3 } from './protocol';
 
 export const FOOD_KINDS = ['soup', 'pizza', 'ice'] as const;
@@ -12,6 +13,9 @@ export const LIMITS = {
   MAX_DEBRIS_SPEED: 40, // m/s, clamped
   DEBRIS_PER_SEC: 15, // per player, excess dropped
   HONK_BROADCASTS_PER_SEC: 4, // per player (every honk still counts in the stats)
+  QUICK_PER_SEC: 3, // per player: quick-chat messages that are even looked at (on top of the 1.5 s cooldown)
+  SALVAGE_PER_SEC: 4, // per player: salvage claims
+  CAPS_PER_SEC: 1, // per player: device-facts messages
   NAME_LENGTH: 12,
   ID_LENGTH: 24,
 } as const;
@@ -121,6 +125,15 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case 'stat':
       if (typeof m.key !== 'string' || !(STAT_KEYS as readonly string[]).includes(m.key) || !isFiniteNum(m.delta)) return null;
       return { type: 'stat', key: m.key as StatKey, delta: m.delta };
+    case 'quick': {
+      if (!isPingId(m.id)) return null;
+      if (m.orderId === undefined || m.orderId === null) return { type: 'quick', id: m.id };
+      return shortString(m.orderId) ? { type: 'quick', id: m.id, orderId: m.orderId } : null;
+    }
+    case 'salvage':
+      return shortString(m.zoneId) ? { type: 'salvage', zoneId: m.zoneId } : null;
+    case 'caps':
+      return { type: 'caps', touch: m.touch === true, autoGas: m.autoGas === true };
     case 'debugGive':
       return m.orderId === undefined ? { type: 'debugGive' } : shortString(m.orderId) ? { type: 'debugGive', orderId: m.orderId } : null;
     default:

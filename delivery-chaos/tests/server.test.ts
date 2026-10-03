@@ -345,3 +345,79 @@ describe('hardening', () => {
     b.close();
   });
 });
+
+describe('v0.3: /healthz, co-op messages and the round log', () => {
+  it('/healthz answers 200 JSON (GET and HEAD), without caching, and never needs dist/', async () => {
+    const res = await fetch(`http://127.0.0.1:${plainServer.port}/healthz`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.json()).toMatchObject({ ok: true });
+    const head = await fetch(`http://127.0.0.1:${plainServer.port}/healthz`, { method: 'HEAD' });
+    expect(head.status).toBe(200);
+    const post = await fetch(`http://127.0.0.1:${plainServer.port}/healthz`, { method: 'POST' });
+    expect(post.status).toBe(405);
+  });
+
+  it('quick chat, claims and salvage work end to end; one anonymous JSON line is logged for the round', async () => {
+    const lines: string[] = [];
+    const srv = await startServer({ port: 0, host: '127.0.0.1', distDir: os.tmpdir(), debug: true, roundLog: (l) => lines.push(l) });
+    const a = await Client.open(srv.port);
+    const b = await Client.open(srv.port);
+    try {
+      a.send({ type: 'hello', name: 'Alice-secret' });
+      a.send({ type: 'createRoom' });
+      const created = room(await a.waitFor(isRoom));
+      b.send({ type: 'hello', name: 'Bob-secret' });
+      b.send({ type: 'joinRoom', code: created.code });
+      await a.waitFor((m) => isRoom(m) && room(m).players.length === 2);
+      a.send({ type: 'caps', touch: true, autoGas: true });
+      a.send({ type: 'startGame', seed: 7, duration: 3 });
+      await a.waitFor((m) => m.type === 'start');
+      await b.waitFor((m) => m.type === 'start');
+      await a.waitFor((m) => m.type === 'orders');
+
+      // quick chat reaches both; garbage is dropped
+      a.send({ type: 'quick', id: 'nice' });
+      a.send({ type: 'quick', id: 'run-this-code' } as Record<string, unknown>);
+      const seenByB = (await b.waitFor((m) => m.type === 'event' && m.ev === 'ping')) as unknown as { playerId: string; pingId: string };
+      expect(seenByB).toMatchObject({ playerId: a.id, pingId: 'nice' });
+      await a.waitFor((m) => m.type === 'event' && m.ev === 'ping');
+      await sleep(100);
+      expect(b.events('ping')).toHaveLength(1);
+
+      // crash with an order on the rack -> a salvage zone appears for both; b rescues it
+      a.send({ type: 'debugGive' });
+      await a.waitFor((m) => m.type === 'orders' && m.list.some((o) => o.carrierId === a.id));
+      const t = await serverClock(a);
+      a.send({ type: 'state', t, p: [30, 0.5, 30], h: 0, l: 0, v: 5, crashed: false, cargo: null });
+      b.send({ type: 'state', t, p: [31, 0.5, 30], h: 0, l: 0, v: 0, crashed: false, cargo: null });
+      await sleep(100);
+      a.send({ type: 'stat', key: 'crashes', delta: 1 });
+      const zoneMsg = (await b.waitFor((m) => m.type === 'salvage' && m.list.length === 1)) as Extract<ServerMsg, { type: 'salvage' }>;
+      await a.waitFor((m) => m.type === 'salvage' && m.list.length === 1);
+      expect(zoneMsg.list[0]).toMatchObject({ ownerId: a.id, x: 30, z: 30 });
+      await b.waitFor((m) => m.type === 'event' && m.ev === 'ping' && m.pingId === 'help');
+      expect(a.events('ping').filter((e) => e.pingId === 'help')).toHaveLength(0); // the crasher is not sent their own SOS
+      a.send({ type: 'salvage', zoneId: zoneMsg.list[0]!.id }); // the owner: ignored
+      b.send({ type: 'salvage', zoneId: zoneMsg.list[0]!.id });
+      const got = (await a.waitFor((m) => m.type === 'event' && m.ev === 'salvage')) as unknown as { playerId: string; tip: number };
+      expect(got).toMatchObject({ playerId: b.id, tip: 6 });
+      await b.waitFor((m) => m.type === 'salvage' && m.list.length === 0);
+
+      // the round ends: results + exactly one anonymous log line
+      const res = (await a.waitFor((m) => m.type === 'results', 6000)) as Extract<ServerMsg, { type: 'results' }>;
+      expect(res.awards.some((x) => x.id === 'salvage' && x.playerId === b.id)).toBe(true);
+      await sleep(100);
+      expect(lines).toHaveLength(1);
+      const s = JSON.parse(lines[0]!);
+      expect(s).toMatchObject({ evt: 'round', players: 2, touchPlayers: 1, autoGasPlayers: 1, salvages: 1, crashes: 1, claims: 0 });
+      expect(s.pings.nice).toBe(1);
+      expect(lines[0]).not.toMatch(/secret|Alice|Bob|127\.0\.0\.1|::1/);
+      expect(lines[0]).not.toContain(a.id);
+    } finally {
+      a.close();
+      b.close();
+      await srv.close();
+    }
+  });
+});

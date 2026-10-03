@@ -1,20 +1,29 @@
 // Application shell: URL params, renderer, screens (menu / lobby / game / results) and the transport wiring.
 import * as THREE from 'three';
 import { PLAYER_COLORS, TOUCH } from '../shared/constants';
+import { PING_IDS } from '../shared/pings';
 import type { ClientMsg, ResultsMsg, RoomPhase, RoomPlayerInfo, ServerMsg } from '../shared/protocol';
 import { Sfx } from './audio';
 import { Game, type GameDeps } from './game';
+import { HealthMonitor } from './health';
+import { HintManager, HintStore, type HintId } from './hints';
 import { errorText, getLang, initLang, netText, onLangChange, setLang, t, type Lang } from './i18n';
 import { Input } from './input';
+import { stepIndex } from './quickWheel';
+import { Settings } from './settings';
 import { LocalTransport } from './net/localTransport';
 import type { Transport } from './net/transport';
 import { WsTransport } from './net/wsTransport';
 import { TouchControls, detectTouchDevice } from './touch';
+import { EdgeCues } from './ui/cues';
 import { Hud } from './ui/hud';
 import { Lobby } from './ui/lobby';
 import { Menu, loadName } from './ui/menu';
 import { Notice } from './ui/notice';
 import { Results } from './ui/results';
+import { SettingsPanel } from './ui/settingsPanel';
+import { SoundBanner } from './ui/soundBanner';
+import { QuickWheel } from './ui/wheel';
 import './ui/style.css';
 
 export interface UrlParams {
@@ -33,6 +42,8 @@ export interface UrlParams {
   touch: boolean;
   /** ?lang=zh|en (handled by i18n.initLang; kept here for completeness) */
   lang?: Lang;
+  /** ?autogas=0|1 forces auto-gas off / on (QA); never saved */
+  autogas?: boolean;
 }
 
 export function parseParams(search: string): UrlParams {
@@ -57,6 +68,7 @@ export function parseParams(search: string): UrlParams {
     name: q.get('name') || undefined,
     touch: q.has('touch'),
     lang: q.get('lang') === 'zh' ? 'zh' : q.get('lang') === 'en' ? 'en' : undefined,
+    autogas: q.get('autogas') === '1' ? true : q.get('autogas') === '0' ? false : undefined,
   };
 }
 
@@ -92,6 +104,19 @@ export class App {
   private touch: TouchControls | null = null;
   private gameDeps: GameDeps | null = null;
   private readonly rotateEl: HTMLElement;
+  // ---- v0.3
+  private readonly settings: Settings;
+  private readonly hints: HintManager;
+  private readonly cues: EdgeCues;
+  private readonly wheel: QuickWheel;
+  private readonly banner: SoundBanner;
+  private readonly settingsPanel: SettingsPanel;
+  private readonly health = new HealthMonitor();
+  private pendingOnline: { mode: 'create' | 'join'; name: string; code: string; timer: ReturnType<typeof setTimeout> } | null = null;
+  private bannerSince = 0;
+  private capsSent = false;
+  private readonly hintsSeen = new HintStore();
+  private currentHintId: HintId | null = null;
 
   constructor(private readonly params: UrlParams) {
     initLang(window.location.search);
@@ -114,6 +139,38 @@ export class App {
     this.sfx.attachLifecycle(); // gesture unlocking (iOS), hidden-tab silence
     this.hud = new Hud(ui, params.debug);
     this.hud.setMuteHandler(() => this.toggleMute());
+    this.hud.setSettingsHandler(() => this.toggleSettings());
+    this.settings = new Settings({ forceAutoGas: params.autogas });
+    this.hints = new HintManager(
+      this.hintsSeen,
+      (id) => {
+        this.currentHintId = id;
+        this.hud.setHint(this.hintText(id));
+      },
+      () => {
+        this.currentHintId = null;
+        this.hud.setHint(null);
+      },
+    );
+    this.cues = new EdgeCues(ui);
+    this.wheel = new QuickWheel(ui);
+    this.banner = new SoundBanner(ui, () => this.sfx.unlockWithConfirm());
+    this.settingsPanel = new SettingsPanel(ui, {
+      getVolume: () => this.sfx.getVolume(),
+      setVolume: (v) => this.sfx.setVolume(v),
+      testSound: () => this.sfx.unlockThen(() => this.sfx.testSound()),
+      getAutoGas: () => this.settings.autoGas(this.touchUI),
+      setAutoGas: (v) => {
+        this.settings.setAutoGas(v);
+        this.touch?.setAutoGas(v);
+        this.sendCaps();
+      },
+      getSteadyRack: () => this.settings.steadyRack,
+      setSteadyRack: (v) => (this.settings.steadyRack = v),
+      getMuteChat: () => this.settings.muteChat,
+      setMuteChat: (v) => (this.settings.muteChat = v),
+      onClose: () => this.onSettingsClosed(),
+    });
     // the order cards (top right) must stay above the touch buttons (bottom right)
     this.hud.setBottomLimit(() => (this.touch?.rects().filter((r) => r.x0 > window.innerWidth / 2).reduce((m, r) => Math.min(m, r.y0), Infinity) ?? Infinity));
     this.rotateEl = document.createElement('div');
@@ -126,12 +183,13 @@ export class App {
       ui,
       {
         onSolo: (name) => void this.startSolo(name, true),
-        onCreate: (name) => void this.startOnline('create', name),
+        onCreate: (name) => this.requestOnline('create', name),
         onJoin: (name, code) => {
           if (!/^[A-Z]{4}$/.test(code)) this.notice.toast(t('toast.codeInvalid'));
-          else void this.startOnline('join', name, code);
+          else this.requestOnline('join', name, code);
         },
         onToggleMute: () => this.toggleMute(),
+        onSettings: () => this.toggleSettings(),
       },
       params.name ?? loadName(),
       true,
@@ -146,8 +204,11 @@ export class App {
     });
     this.results = new Results(ui);
     this.input.attach();
+    this.wireQuickChat();
     if (this.touchUI) this.enableTouchUI();
     this.updateMuteUi();
+    this.startHealthWatch();
+    this.startBannerWatch();
     // phones that were not detected as touch devices (touch-screen laptops): switch on the first real touch
     window.addEventListener(
       'pointerdown',
@@ -169,8 +230,15 @@ export class App {
     });
     window.addEventListener('resize', () => this.updateRotate());
     window.addEventListener('orientationchange', () => this.updateRotate());
+    // Esc closes the settings panel
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Escape' && this.settingsPanel.isOpen) this.settingsPanel.hide();
+    });
     onLangChange(() => {
       this.notice.applyLang();
+      this.banner.applyLang();
+      this.wheel.applyLang();
+      this.settingsPanel.applyLang();
       this.touch?.applyLang();
       this.renderRotate();
       this.lobby.refresh();
@@ -186,10 +254,160 @@ export class App {
     if (!this.touch) {
       this.touch = new TouchControls(document.getElementById('ui')!);
       this.input.setTouchSource(this.touch);
+      this.touch.setQuickHost({
+        enabled: () => this.quickAvailable(),
+        open: () => this.wheel.open('touch'),
+        move: (dx, dy) => this.wheel.setVector(dx, dy),
+        close: (commit) => {
+          const i = this.wheel.close();
+          if (commit && i !== null) this.game?.sendQuick(PING_IDS[i]!);
+        },
+      });
     }
+    this.touch.setAutoGas(this.settings.autoGas(true));
+    this.sendCaps();
     if (this.gameDeps) this.gameDeps.touch = this.touch;
     if (this.phase === 'playing' && this.game && !this.disconnected) this.touch.setVisible(true);
     this.updateRotate();
+  }
+
+  // ------------------------------------------------------------------ v0.3: quick chat, settings, hints, banner, server wake-up
+  private hintText(id: HintId): string {
+    const touch = this.touchUI;
+    switch (id) {
+      case 'start':
+        return t(touch ? 'hint.start.touch' : 'hint.start.keys');
+      case 'crash':
+        return t(touch ? 'hint.crash.touch' : 'hint.crash.keys');
+      case 'approach':
+        return t('hint.approach');
+      case 'cargo':
+        return t('hint.cargo');
+      case 'salvage':
+        return t('hint.salvage');
+    }
+  }
+
+  private quickAvailable(): boolean {
+    return !!this.game?.quickEnabled() && this.input.enabled && !this.settingsPanel.isOpen;
+  }
+
+  private readonly wheelMouse = (e: MouseEvent) => {
+    const r = this.wheel.rect();
+    if (!r) return;
+    this.wheel.setVector(e.clientX - (r.x0 + r.x1) / 2, e.clientY - (r.y0 + r.y1) / 2);
+  };
+
+  private closeWheel(commit: boolean): void {
+    window.removeEventListener('mousemove', this.wheelMouse);
+    const i = this.wheel.close();
+    if (commit && i !== null) this.game?.sendQuick(PING_IDS[i]!);
+  }
+
+  /** keyboard side of the wheel: 1-6 send, holding H opens it (mouse or arrow keys choose, releasing H sends) */
+  private wireQuickChat(): void {
+    this.input.setQuickHost({
+      enabled: () => this.quickAvailable(),
+      isOpen: () => this.wheel.isOpen,
+      open: () => {
+        this.wheel.open('keys');
+        window.addEventListener('mousemove', this.wheelMouse);
+      },
+      close: (commit) => this.closeWheel(commit),
+      step: (dir) => this.wheel.setIndex(stepIndex(this.wheel.selected, dir)),
+      send: (i) => {
+        if (this.wheel.isOpen) this.closeWheel(false);
+        this.game?.sendQuick(PING_IDS[i]!);
+      },
+    });
+  }
+
+  private toggleSettings(): void {
+    if (this.settingsPanel.isOpen) {
+      this.settingsPanel.hide();
+      return;
+    }
+    this.settingsPanel.show();
+    // opened mid-round: the bike stops taking input while the panel is up (it coasts to a halt)
+    if (this.phase === 'playing') this.input.enabled = false;
+  }
+
+  private onSettingsClosed(): void {
+    if (this.phase === 'playing' && !this.disconnected) this.input.enabled = true;
+  }
+
+  /** online devices tell the server (anonymously) whether they are touch / auto-gas, for the round-summary log */
+  private sendCaps(): void {
+    if (this.transport?.kind !== 'ws' || !this.room) return;
+    this.transport.send({ type: 'caps', touch: this.touchUI, autoGas: this.touchUI && this.settings.autoGas(true) });
+  }
+
+  private updateBanner(): void {
+    const want = this.phase === 'playing' && !this.disconnected && this.sfx.needsUnlock();
+    const now = performance.now();
+    if (!want) this.bannerSince = 0;
+    else if (!this.bannerSince) this.bannerSince = now;
+    // a context that is only a moment away from running (just tapped) must not flash the banner
+    const show = want && now - this.bannerSince > 500;
+    this.banner.set(show);
+    if (show) {
+      // small screens: sit just under the cargo panel (which grows a line while carrying) instead of on top of it
+      const cargo = document.querySelector<HTMLElement>('.hud-cargo');
+      const r = cargo?.getBoundingClientRect();
+      this.banner.root.style.top = window.innerHeight <= 500 && r && r.height > 0 ? `${Math.round(r.bottom + 6)}px` : '';
+    }
+  }
+
+  private startBannerWatch(): void {
+    setInterval(() => this.updateBanner(), 250);
+    this.sfx.onStateChanged(() => this.updateBanner());
+    document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && this.updateBanner());
+  }
+
+  /** Wake the host and keep the menu's status dot current. */
+  private startHealthWatch(): void {
+    this.menu.setServerStatus(false, 0);
+    this.health.onChange(() => {
+      this.menu.setServerStatus(true, this.health.waitedSeconds());
+      const p = this.pendingOnline;
+      if (p) {
+        clearTimeout(p.timer);
+        this.pendingOnline = null;
+        this.menu.showWakeHint(false);
+        this.notice.toast(t('status.ready'));
+        void this.startOnline(p.mode, p.name, p.code);
+      }
+    });
+    this.health.start();
+    setInterval(() => {
+      if (!this.health.up) this.menu.setServerStatus(false, this.health.waitedSeconds());
+    }, 1000);
+  }
+
+  /** Create / join: straight away when the host is awake, otherwise explain and connect by itself once it is. */
+  private requestOnline(mode: 'create' | 'join', name: string, code = ''): void {
+    if (this.health.up) {
+      void this.startOnline(mode, name, code);
+      return;
+    }
+    if (this.pendingOnline) clearTimeout(this.pendingOnline.timer);
+    // if the probe never answers (blocked /healthz ...) try the socket anyway after a while
+    const timer = setTimeout(() => {
+      const p = this.pendingOnline;
+      if (!p) return;
+      this.pendingOnline = null;
+      this.menu.showWakeHint(false);
+      void this.startOnline(p.mode, p.name, p.code);
+    }, 75000);
+    this.pendingOnline = { mode, name, code, timer };
+    this.menu.show();
+    this.menu.showWakeHint(true);
+  }
+
+  private cancelPendingOnline(): void {
+    if (this.pendingOnline) clearTimeout(this.pendingOnline.timer);
+    this.pendingOnline = null;
+    this.menu.showWakeHint(false);
   }
 
   private toggleMute(): void {
@@ -235,15 +453,29 @@ export class App {
     if (p.solo) {
       this.menu.hide();
       void this.startSolo(p.name ?? loadName(), p.autostart);
-    } else if (p.create) {
+    } else if (p.create || p.room) {
       this.menu.hide();
-      void this.startOnline('create', p.name ?? loadName());
-    } else if (p.room) {
-      this.menu.hide();
-      void this.startOnline('join', p.name ?? loadName(), p.room);
+      void this.bootOnline(p.create ? 'create' : 'join', p.name ?? loadName(), p.room ?? '');
     } else {
       this.menu.show();
     }
+  }
+
+  /** invite links: give a sleeping host a moment (usually it answers at once), else wait on the menu with the status dot */
+  private async bootOnline(mode: 'create' | 'join', name: string, code: string): Promise<void> {
+    if (!this.health.up) {
+      await new Promise<void>((resolve) => {
+        const off = this.health.onChange(() => {
+          off();
+          resolve();
+        });
+        setTimeout(() => {
+          off();
+          resolve();
+        }, 600);
+      });
+    }
+    this.requestOnline(mode, name, code);
   }
 
   private startOverrides(): { seed?: number; duration?: number } {
@@ -254,6 +486,7 @@ export class App {
   }
 
   private async startSolo(name: string, autostart: boolean): Promise<void> {
+    this.cancelPendingOnline();
     if (!this.renderer) {
       this.menu.show();
       alert(t('err.noWebgl'));
@@ -365,6 +598,10 @@ export class App {
     this.input.enabled = true;
     this.touch?.setVisible(false);
     this.sfx.setEngine(0, 0, false);
+    this.closeWheel(false);
+    this.cues.clear();
+    this.hints.clear();
+    this.capsSent = false;
   }
 
   private toMenu(): void {
@@ -386,6 +623,10 @@ export class App {
         break;
       case 'room':
         this.room = { code: msg.code, hostId: msg.hostId, phase: msg.phase, players: msg.players };
+        if (!this.capsSent) {
+          this.capsSent = true;
+          this.sendCaps();
+        }
         this.onRoom(this.room);
         break;
       case 'start':
@@ -394,6 +635,7 @@ export class App {
       case 'results':
         this.lastResults = msg;
         this.phase = 'results';
+        this.closeWheel(false);
         this.game?.finish(msg);
         this.showResults();
         break;
@@ -470,6 +712,9 @@ export class App {
       forceShadows: this.params.shadows,
       touch: this.touch,
       lowPower,
+      settings: this.settings,
+      hints: this.hints,
+      cues: this.cues,
     };
     if (this.params.shadows) this.gameDeps.shadows = true;
     this.game = new Game(
@@ -491,6 +736,13 @@ export class App {
       lang: getLang(),
       touch: this.touchUI,
       muted: this.sfx.isMuted(),
+      sound: { ...this.sfx.info(), banner: this.banner.visible },
+      hint: this.currentHintId,
+      hintsSeen: this.hintsSeen.list(),
+      wheelOpen: this.wheel.isOpen,
+      settingsOpen: this.settingsPanel.isOpen,
+      server: { up: this.health.up, waited: this.health.waitedSeconds(), tries: this.health.tries },
+      autoGas: this.settings.autoGas(this.touchUI),
     };
     if (!g) {
       return {
@@ -517,6 +769,13 @@ export class App {
     honk: () => this.game?.debug.honk(),
     /** QA: audio graph state (context state, mute, engine gain, output RMS) */
     audio: () => this.sfx.info(),
+    /** QA: sleep the AudioContext like an interruption would */
+    suspendAudio: () => this.sfx.debugSuspend(),
+    /** QA: quick chat exactly as the wheel sends it */
+    quick: (id: Parameters<NonNullable<Game['debug']['quick']>>[0]) => this.game?.debug.quick(id) ?? false,
+    /** QA: show / hide the quick-chat wheel without a teammate (layout checks on every screen size) */
+    showWheel: (on: boolean, mode: 'touch' | 'keys' = 'touch') => (on ? this.wheel.open(mode) : this.wheel.close()),
+    pingLog: () => this.game?.pingLog.map((p) => ({ ...p })) ?? [],
     hudRects: () => this.game?.debug.hudRects() ?? { hud: [], touch: [] },
     counters: () => this.game?.counters ?? { honks: 0, resets: 0 },
     setLang: (l: Lang) => setLang(l, false),

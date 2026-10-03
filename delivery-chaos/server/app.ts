@@ -3,6 +3,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { performance } from 'node:perf_hooks';
 import { WebSocket, WebSocketServer } from 'ws';
+import { GAME_VERSION } from '../src/shared/constants';
 import { RoomManager, type Conn } from './rooms';
 import { createStaticHandler } from './static';
 
@@ -13,6 +14,8 @@ export interface ServerOptions {
   /** DC_DEBUG=1: debugGive + host seed/duration overrides */
   debug?: boolean;
   log?: (line: string) => void;
+  /** receives the one-line anonymous JSON summary of every finished online round (DESIGN §14.4); default: dropped */
+  roundLog?: (line: string) => void;
   /** room tick interval (ms) */
   tickMs?: number;
   maxConnections?: number;
@@ -30,10 +33,24 @@ export function startServer(opts: ServerOptions): Promise<RunningServer> {
   const log = opts.log ?? (() => {});
   const t0 = performance.now();
   const now = () => (performance.now() - t0) / 1000;
-  const manager = new RoomManager({ debug: !!opts.debug, now, log });
+  const manager = new RoomManager({ debug: !!opts.debug, now, log, roundLog: opts.roundLog });
   const maxConnections = opts.maxConnections ?? 500;
 
-  const server = http.createServer(createStaticHandler(opts.distDir));
+  const serveStatic = createStaticHandler(opts.distDir);
+  const server = http.createServer((req, res) => {
+    // wake-up probe (DESIGN §14.1): the page pings this on load so a sleeping free-tier host starts booting at once
+    if (req.url === '/healthz' || req.url?.startsWith('/healthz?')) {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        res.writeHead(405).end();
+        return;
+      }
+      const body = JSON.stringify({ ok: true, v: GAME_VERSION });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Length': Buffer.byteLength(body) });
+      res.end(req.method === 'HEAD' ? undefined : body);
+      return;
+    }
+    serveStatic(req, res);
+  });
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES, perMessageDeflate: false });
   const alive = new WeakMap<WebSocket, boolean>();
 

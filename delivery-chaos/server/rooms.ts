@@ -3,6 +3,7 @@
 import { GameRoom } from '../src/shared/rules';
 import { GAME } from '../src/shared/constants';
 import type { ErrorCode, ServerMsg } from '../src/shared/protocol';
+import { formatRoundSummary } from '../src/shared/summary';
 import { TokenBucket, parseClientMsg } from '../src/shared/validate';
 
 export interface Conn {
@@ -17,6 +18,8 @@ export interface RoomManagerOptions {
   now: () => number;
   maxRooms?: number;
   log?: (line: string) => void;
+  /** one anonymous JSON line per finished round (DESIGN §14.4); no names, no ids, no IPs */
+  roundLog?: (line: string) => void;
 }
 
 interface Session {
@@ -149,7 +152,7 @@ export class RoomManager {
       const room = s.room;
       if (!room) {
         // state messages racing with a leave are harmless; anything else deserves an answer
-        if (msg.type !== 'state' && msg.type !== 'stat' && msg.type !== 'debris') this.error(s, ERR.noRoom);
+        if (msg.type !== 'state' && msg.type !== 'stat' && msg.type !== 'debris' && msg.type !== 'caps' && msg.type !== 'salvage') this.error(s, ERR.noRoom);
         return;
       }
       if (msg.type === 'debugGive' && !this.opts.debug) {
@@ -215,6 +218,7 @@ export class RoomManager {
           for (const t of entry.sessions.values()) if (t.id !== except) this.send(t, msg);
         },
         seedSource: () => Math.floor(Math.random() * 0x7fffffff),
+        onRoundEnd: (summary) => this.opts.roundLog?.(formatRoundSummary(summary)),
       }),
     };
     this.rooms.set(code, entry);

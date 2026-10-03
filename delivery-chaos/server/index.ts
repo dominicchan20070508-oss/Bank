@@ -21,7 +21,15 @@ export function lanUrls(port: number): string[] {
   return out;
 }
 
-const running = await startServer({ port: PORT, host: '0.0.0.0', distDir: DIST, debug: DEBUG, log: (l) => console.log(`[server] ${l}`) });
+const running = await startServer({
+  port: PORT,
+  host: '0.0.0.0',
+  distDir: DIST,
+  debug: DEBUG,
+  log: (l) => console.log(`[server] ${l}`),
+  // one anonymous JSON line per finished online round, printed bare so it is easy to grep/parse in the Render log
+  roundLog: (line) => console.log(line),
+});
 
 console.log('');
 console.log('  外卖大乱送 Delivery Chaos 已启动 / server is up');

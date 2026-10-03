@@ -8,6 +8,8 @@ export interface MinimapPlayer {
   heading: number;
   color: number;
   me: boolean;
+  /** quick-chat flash: 0..1 progress of the expanding ring (undefined = none) */
+  flash?: number;
 }
 
 export interface MinimapMarker {
@@ -15,6 +17,8 @@ export interface MinimapMarker {
   z: number;
   color: number;
   pulse?: boolean;
+  /** salvage zones get a filled dot and a bigger ring so they stand out from the pickup rings */
+  salvage?: boolean;
 }
 
 const hex = (c: number) => '#' + c.toString(16).padStart(6, '0');
@@ -106,14 +110,33 @@ export class Minimap {
       ctx.strokeStyle = hex(m.color);
       ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.arc(this.sx(m.x), this.sz(m.z), 9 * pulse * (this.scale / 0.7), 0, Math.PI * 2);
+      ctx.arc(this.sx(m.x), this.sz(m.z), (m.salvage ? 11 : 9) * pulse * (this.scale / 0.7), 0, Math.PI * 2);
       ctx.stroke();
+      if (m.salvage) {
+        ctx.fillStyle = hex(m.color);
+        ctx.strokeStyle = '#2b2a33';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(this.sx(m.x), this.sz(m.z), 4.5 * (this.scale / 0.7), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
     }
     // players (me last)
     const sorted = [...players].sort((a, b) => Number(a.me) - Number(b.me));
     for (const p of sorted) {
       const x = this.sx(p.x);
       const y = this.sz(p.z);
+      if (p.flash !== undefined && p.flash >= 0 && p.flash <= 1) {
+        // quick-chat flash: a ring that expands and fades around the rider
+        ctx.strokeStyle = hex(p.color);
+        ctx.globalAlpha = 1 - p.flash;
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(x, y, (8 + 26 * p.flash) * (s / 0.7), 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
       ctx.save();
       ctx.translate(x, y);
       ctx.rotate(-p.heading + Math.PI); // heading 0 = +z = down on the map

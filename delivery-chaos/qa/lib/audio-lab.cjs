@@ -26,9 +26,21 @@ const SOUNDS = {
   pickup: { duration: 0.5, rmsWindow: [0, 0.35], events: [{ t: 0.02, call: 'pickup', args: [] }] },
   chime: { duration: 1.1, rmsWindow: [0, 0.9], events: [{ t: 0.02, call: 'chime', args: [] }] },
   fail: { duration: 0.5, rmsWindow: [0, 0.35], events: [{ t: 0.02, call: 'fail', args: [] }] },
+  // v0.3
+  salvage: { duration: 0.7, rmsWindow: [0, 0.5], events: [{ t: 0.02, call: 'salvage', args: [] }] },
+  confirm: { duration: 0.5, rmsWindow: [0, 0.35], events: [{ t: 0.02, call: 'confirm', args: [] }] },
 };
+const PING_IDS = ['claim', 'help', 'wait', 'follow', 'thanks', 'nice'];
+for (const id of PING_IDS) SOUNDS[`ping-${id}`] = { duration: 0.6, rmsWindow: [0, 0.4], events: [{ t: 0.02, call: 'ping', args: [id] }] };
+/** all six quick-chat sounds one after the other (for listening) */
+SOUNDS.ping = { duration: 0.8 * PING_IDS.length, rmsWindow: [0, 0.4], events: PING_IDS.map((id, i) => ({ t: 0.02 + i * 0.8, call: 'ping', args: [id] })) };
+/** volume-slider test sound: horn + chime */
+SOUNDS['test-sound'] = { duration: 1.9, rmsWindow: [0, 1.5], events: [{ t: 0.02, call: 'testSound', args: [] }] };
 
-/** crash + big splash + horn + full-throttle engine + dog bark, all overlapping */
+/** the sounds that must be loud enough for a phone speaker: single-sound peak 0.6-0.8 at the default volume */
+const MAIN_SOUNDS = ['horn', 'dog', 'crash', 'chime', 'pickup', 'salvage', 'ping-claim', 'ping-help', 'ping-nice'];
+
+/** crash + big splash + horn + full-throttle engine + dog bark (+ chime, ping, salvage), all overlapping */
 const WORST_CASE = {
   duration: 2.5,
   rmsWindow: [0.3, 1.5],
@@ -40,6 +52,9 @@ const WORST_CASE = {
     { t: 0.55, call: 'dogBark', args: [] },
     { t: 0.55, call: 'thud', args: [1] },
     { t: 0.7, call: 'pop', args: [] },
+    { t: 0.6, call: 'chime', args: [] },
+    { t: 0.6, call: 'ping', args: ['help'] },
+    { t: 0.65, call: 'salvage', args: [] },
   ],
 };
 
@@ -47,7 +62,7 @@ const WORST_CASE = {
 async function inPage(spec) {
   const sr = 44100;
   const ctx = new OfflineAudioContext(1, Math.ceil(spec.duration * sr), sr);
-  const sfx = new window.__game.Sfx(true, { ctx, muted: !!spec.muted });
+  const sfx = new window.__game.Sfx(true, { ctx, muted: !!spec.muted, ...(spec.volume !== undefined ? { volume: spec.volume } : {}) });
   const events = [...spec.events].sort((a, b) => a.t - b.t);
   for (const ev of events) {
     if (ev.call === 'setMuted') {
@@ -112,4 +127,4 @@ function wav(b64) {
 
 const db = (v) => (v > 0 ? (20 * Math.log10(v)).toFixed(1) : '-inf');
 
-module.exports = { SOUNDS, WORST_CASE, engineEvents, render, wav, db, SR };
+module.exports = { SOUNDS, WORST_CASE, MAIN_SOUNDS, PING_IDS, engineEvents, render, wav, db, SR };

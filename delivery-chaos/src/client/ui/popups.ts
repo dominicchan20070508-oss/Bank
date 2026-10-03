@@ -4,6 +4,8 @@ export type Projector = (x: number, y: number, z: number) => { x: number; y: num
 interface Bubble {
   el: HTMLElement;
   world: [number, number, number];
+  /** keeps the bubble glued to a moving rider */
+  follow?: () => [number, number, number] | null;
   expires: number;
   fading: boolean;
 }
@@ -64,6 +66,31 @@ export class Popups {
     this.place(el, world);
   }
 
+  /**
+   * A rider's speech bubble that follows them (quick chat, teammate honks). `cls` styles it (e.g. 'ping', 'honk');
+   * `color` outlines it in the rider's colour. At most one bubble per `key` (a new one replaces the old).
+   */
+  followBubble(key: string, text: string, who: string, follow: () => [number, number, number] | null, ms: number, opts: { cls?: string; color?: string } = {}): void {
+    this.bubbles = this.bubbles.filter((b) => {
+      if (b.el.dataset.key !== key) return true;
+      b.el.remove();
+      return false;
+    });
+    const el = document.createElement('div');
+    el.className = `bubble follow ${opts.cls ?? ''}`.trim();
+    el.dataset.key = key;
+    if (opts.color) el.style.setProperty('--pc', opts.color);
+    const w = document.createElement('span');
+    w.className = 'who';
+    w.textContent = who;
+    el.append(w, document.createTextNode(text));
+    this.root.append(el);
+    const start = follow() ?? [0, 0, 0];
+    const b: Bubble = { el, world: start, follow, expires: performance.now() + ms, fading: false };
+    this.bubbles.push(b);
+    this.place(el, start);
+  }
+
   tip(amount: number, parts: string, who: string): void {
     this.root.querySelector('.tipcard')?.remove();
     const el = document.createElement('div');
@@ -98,6 +125,10 @@ export class Popups {
       if (!b.fading && now > b.expires - 400) {
         b.fading = true;
         b.el.classList.add('fade');
+      }
+      if (b.follow) {
+        const w = b.follow();
+        if (w) b.world = w;
       }
       if (this.project) {
         const p = this.project(b.world[0], b.world[1], b.world[2]);

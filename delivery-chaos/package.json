@@ -1,6 +1,6 @@
 {
   "name": "delivery-chaos",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "外卖大乱送 / Delivery Chaos — chaotic co-op motorbike food-delivery web game",
   "type": "module",

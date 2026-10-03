@@ -58,3 +58,25 @@ These were verified against the code at v0.2 (October 2026). Paths are relative 
 - Small team (Claude PM plus a Sonnet coder agent), a free server, and low-poly primitive art (no asset pipeline).
 - The game must stay 60 fps on a laptop and playable on mid-range phones (DPR cap 1.5, shadows off on touch).
 - Every change must keep `npm run typecheck`, `npm test`, `npm run build`, `qa/pm-solo.mjs`, `qa/pm-multi.mjs` and `qa/v02.cjs` passing.
+
+## Added in v0.3 (DESIGN §14)
+- **Quick chat** (`src/shared/pings.ts`): six presets. The client sends `quick {id, orderId?}`; the server broadcasts `event ping` as codes. On touch, hold the horn; on desktop, use keys 1–6 or hold H.
+  - Claims (`claimedBy` / `claimUntil` on orders) are informational and expire after 15 s. Each rider holds one claim, and only when not carrying.
+  - A crash sends an automatic 🆘 to teammates.
+  - The phone thumb budget is still 6 visible controls; the wheel reuses the horn button.
+- **Salvage zones** are the precedent for *"stop in a zone, the server decides"* applied to a teammate's mishap:
+  - the server creates them when a carrying player crashes, in multiplayer only;
+  - they last 20 s, and only teammates can collect them;
+  - collecting one adds `SALVAGE_TIP` (¥6) to the team.
+- **Assists** (`src/client/assist.ts`):
+  - touch auto-gas, on by default;
+  - auto-slow near the target zone for everyone, which gas or boost overrides;
+  - a steadier-rack assist.
+  None of them affect rewards.
+- **Audio** (`src/client/audio.ts`, `audioSession.ts`):
+  - master compressor −12 dB / 6:1 plus a soft clipper;
+  - main sounds peak around 0.66–0.71, and the worst-case mix around 0.87;
+  - iOS silent-switch handling, a "tap to enable sound" banner, a volume slider, and captions for honks.
+- **Ops**:
+  - a `/healthz` endpoint, with a wake-up ping on page load;
+  - one anonymous JSON summary line per online round in the server log (`src/shared/summary.ts`), with the fields listed in DESIGN §14.4. This is the only telemetry. Use it, plus playtests, before tuning stars or combos.
