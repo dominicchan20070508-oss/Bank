@@ -1,6 +1,6 @@
 # Architecture facts that decide difficulty
 
-These were verified against the code at v0.2 (October 2026). Paths are relative to `delivery-chaos/`. The code evolves, so spot-check a fact before relying on it for a verdict: grep the cited file.
+These were verified against the code at v0.2 (October 2026); the v0.3 additions are listed in the last section. Paths are relative to `delivery-chaos/`. The code evolves, so spot-check a fact before relying on it for a verdict: grep the cited file.
 
 ## Authority and sync
 - **Client authority** covers each player's own bike (position, lean, crash) and own cargo integrity. Clients send `state` at about 20 Hz.
