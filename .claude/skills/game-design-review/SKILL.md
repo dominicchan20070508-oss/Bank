@@ -36,7 +36,15 @@ If the user attached a file (.docx, .md, image), extract its text first. For .do
 
 ## Step 2: Review each idea with the same card
 
-Use this card for every idea. Keep each card tight; the owner should be able to skim it.
+**Put the conclusion first and keep it short.** The owner usually reads on a phone, and in testing, full reviews ran 13–22k characters, which is too long to act on.
+
+- Open with a **结论先行** block of at most 5 lines: the overall verdict, the 1–3 things to do next, and the one thing to not do.
+- Then give the cards. Keep each card's bullets to a single line where possible.
+- If there are more than 6 ideas, give full cards only to the ones you recommend doing or reshaping. The rest go in one line each in the ranking table.
+- Aim for under about 6,000 Chinese characters in total.
+- Put code evidence in a short parenthesis (file path plus the fact), not in paragraphs.
+
+Use this card for every idea:
 
 ```
 ### 〈编号〉〈点子名〉 — 结论：✅ 做 / 🔧 改小了再做 / ⏸ 先试玩再说 / ❌ 不做
