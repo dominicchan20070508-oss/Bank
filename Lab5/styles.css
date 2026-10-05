@@ -1,0 +1,120 @@
+/* Survey Service - single external stylesheet */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background-color: #e8eef4;
+  font-family: Arial, sans-serif;
+  font-size: 1em;
+  color: #222222;
+}
+
+/* Fixed-width page container, centred */
+#container {
+  width: 960px;
+  margin: 0 auto;
+  background-color: #ffffff;
+  overflow: hidden;
+}
+
+/* Logo and branding */
+header {
+  background-color: #1f4e79;
+  padding: 20px;
+}
+
+header h1 {
+  margin: 0;
+  font-family: "Times New Roman", serif;
+  font-size: 2.2em;
+  color: #ffffff;
+}
+
+/* Horizontal menu */
+nav {
+  background-color: #2e75b6;
+}
+
+nav ul {
+  margin: 0;
+  padding: 0;
+  list-style-type: none;
+}
+
+nav li {
+  display: inline-block;
+}
+
+nav a {
+  display: block;
+  padding: 12px 24px;
+  color: #ffffff;
+  text-decoration: none;
+  font-weight: bold;
+}
+
+nav a:hover {
+  background-color: #1f4e79;
+}
+
+/* Main content (left column) */
+main {
+  float: left;
+  width: 70%;
+  padding: 20px;
+}
+
+article {
+  margin-bottom: 20px;
+  padding: 15px;
+  border: 1px solid #b7c9db;
+  background-color: #f7fafc;
+}
+
+article h2 {
+  margin-top: 0;
+  font-size: 1.4em;
+  color: #1f4e79;
+}
+
+article p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* Ad sidebar (right column) */
+aside {
+  float: right;
+  width: 30%;
+  padding: 20px 20px 20px 0;
+}
+
+.ad {
+  margin-bottom: 20px;
+  padding: 12px;
+  border: 1px dashed #888888;
+  background-color: #fff8dc;
+  font-size: 0.85em;
+}
+
+.ad p {
+  margin: 0;
+  line-height: 1.4;
+}
+
+/* Copyright notice */
+footer {
+  clear: both;
+  padding: 12px;
+  background-color: #1f4e79;
+  color: #ffffff;
+  text-align: center;
+  font-size: 0.8em;
+}
+
+footer p {
+  margin: 0;
+}
